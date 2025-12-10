@@ -1,0 +1,158 @@
+# RxnMol: Fragment-Based Synthesis Path Optimization
+
+**A Data-Driven Approach to De Novo Molecular Design**
+
+RxnMol is a novel molecular optimization framework that operates on **synthesis routes** rather than molecular structures directly. By representing candidates as ordered sequences of commercially available building blocks (fragments), RxnMol ensures that every generated molecule comes with a valid, step-by-step synthesis pathway predicted by a neural reaction model.
+
+## Research Overview
+
+### The Core Idea
+Traditional de novo design methods often generate "unmakeable" molecules. RxnMol solves this by optimizing the **recipe** instead of the **result**.
+
+- **Genotype**: Ordered list of fragments `[F₁, F₂, ..., Fₙ]`
+- **Phenotype**: The molecule resulting from reacting these fragments sequentially `F₁ + F₂ → I₁ + F₃ → ... → Final Molecule`
+- **Optimization**: Conformational Space Annealing (CSA) searches the combinatorial space of fragment sequences.
+
+### Key Features
+- **Synthesizability**: All intermediates and final products are validated by a forward reaction prediction model.
+- **Explicit Pathways**: Output includes the exact recipe (reactants and order) to make the molecule.
+- **Controllable Complexity**: Route length constraints (e.g., 2-5 steps) directly control synthetic complexity.
+- **High Performance**: GPU-accelerated batch reaction prediction and caching.
+
+## Installation
+### - Prerequisite: Install PyTorch & TensorRT
+The reaction predictor relies on **Torch-TensorRT** for fast inference code. You must install the version of PyTorch and TensorRT compatible with your specific CUDA version (e.g., CUDA 12.x).
+```bash
+# Install PyTorch and Torch-TensorRT for CUDA 12
+pip install torch torch-tensorrt --index-url https://download.pytorch.org/whl/cu126
+```
+> **Note**: Install `torch` and torch-related packages with compatible versions matching your CUDA version. See [pytorch.org](https://pytorch.org/get-started/locally/) for details.
+
+```bash
+# Clone the repository
+git clone https://github.com/snu-lcbc/RxnMol.git
+cd RxnMol
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Install the package in development mode
+pip install -e .
+```
+> **Note**: TDC requires `numpy<2.0` and `scikit-learn==1.2.2`. These are pinned to avoid compatibility issues with TDC's pre-trained models.
+
+## Architecture
+
+The codebase is organized in `src/rxnmol`:
+
+```
+src/rxnmol/
+├── core/
+│   ├── engine.py          # CSAEngine: The optimization loop
+│   ├── data_models.py     # Candidate, RunContext
+│   └── config.py          # Configuration management
+├── solutions/
+│   ├── fragments_route.py # FragmentRouteSpec: Synthesis logic
+│   ├── smiles_based.py    # SmilesDirectSpec: Raw SMILES optimization
+│   └── reaction_model.py  # RxnPredictor: Transformer model
+├── objectives/            # Objective functions (GuacaMol, TDC, etc.)
+├── runtime/               # Metrics and artifact storage
+└── utils/                 # Helper utilities
+```
+
+## Usage
+
+### Running an Experiment
+
+```bash
+python run.py --config configs.yaml --objective zaleplon
+```
+
+### Configuration Example
+
+```yaml
+# configs.yaml
+csa:
+  bank_size: 100
+  seed_size: 60
+  max_iter: 100
+  d_init: 0.6
+
+solution:
+  spec_type: fragment_route  # or "smiles" for direct SMILES optimization
+  min_fragments: 2
+  max_fragments: 5
+
+objective:
+  name: zaleplon  # Target molecule similarity
+
+runtime:
+  device: cuda    # Use GPU for reaction prediction
+```
+
+### Code Example
+
+```python
+from rxnmol.core import MasterConfig, RunContext, CSAEngine
+from rxnmol.solutions import FragmentRouteSpec
+import numpy as np
+
+# 1. Load Configuration
+config = MasterConfig.from_yaml("configs.yaml")
+
+# 2. Initialize Context
+rng = np.random.default_rng(42)
+context = RunContext(config=config, rng=rng)
+
+# 3. Initialize Solution Specification
+spec = FragmentRouteSpec(context)
+
+# 4. Initialize Engine
+engine = CSAEngine(spec, context)
+
+# 5. Run Optimization
+best_candidate = engine.run()
+
+print(f"Best Score: {best_candidate.objective_value}")
+print(f"Molecule SMILES: {best_candidate.smiles}")
+print(f"Synthesis Route: {best_candidate.genotype}")
+```
+
+### Available Objectives
+
+| Category | Objectives |
+|----------|-----------|
+| Standard | `qed`, `sa_score`, `logp`, `lipinski` |
+| GuacaMol | `zaleplon`, `osimertinib`, `fexofenadine`, `ranolazine`, ... |
+| TDC | `jnk3`, `gsk3b`, `drd2`, `seh`, ... |
+| Custom | Define your own via `ObjectiveFunction` base class |
+
+## Model Weights
+
+The reaction prediction model weights are required for fragment-based optimization. Download from:
+
+- [Model weights (Zenodo/HuggingFace link)] - *Coming soon*
+
+Place the downloaded files in `rxn_smiles_mit/`:
+```
+rxn_smiles_mit/
+├── model_compiled.pt
+├── tokenizer_src.model
+└── tokenizer_trg.model
+```
+
+## License
+
+MIT License
+
+## Citation
+
+If you use RxnMol in your research, please cite:
+
+```bibtex
+@article{rxnmol2025,
+  title={RxnMol: Fragment-Based Synthesis Path Optimization for De Novo Molecular Design},
+  author={RxnMol Team},
+  year={2025}
+}
+```

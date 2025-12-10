@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rxnmol"
+version = "0.1.0"
+description = "Fragment-Based Synthesis Path Optimization for De Novo Molecular Design"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT License"}
+authors = [
+  {name = "RxnMol Team"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    # Scientific Computing
+    "numpy>=1.24.0,<2.0",
+    "scipy>=1.10.0",
+    "scikit-learn==1.2.2",
+
+    # Chemistry & Benchmarks
+    "rdkit>=2023.03.1",
+    "guacamol>=0.5.4",
+    "PyTDC==1.1.15",
+
+    # Utilities
+    "sentencepiece>=0.1.99",
+    "pyyaml>=6.0",
+    "tqdm>=4.65.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "flake8",
+]
+
+[project.urls]
+Homepage = "https://github.com/snu-lcbc/RxnMol"
+Repository = "https://github.com/snu-lcbc/RxnMol.git"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["rxnmol*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+rxnmol = ["*.yaml", "*.json"]

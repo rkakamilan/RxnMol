@@ -1,0 +1,145 @@
+# ==============================================================================
+# Fragment-CSA / MolFinder Configuration
+# ==============================================================================
+# This configuration file controls all aspects of the optimization process.
+# It supports a hierarchical override system:
+#   Defaults -> This YAML file -> CLI arguments -> Environment variables
+#
+# To override via CLI: python run.py --section.param value
+# Example: python run.py --csa.bank_size 200 --objective.name qed
+
+# ------------------------------------------------------------------------------
+# CSA (Conformational Space Annealing) Algorithm Parameters
+# ------------------------------------------------------------------------------
+csa:
+  bank_size: 100          # Population size (N). The number of solutions kept in the bank.
+  seed_size: 60           # Number of seeds selected per iteration (M).
+  max_iter: 100           # Maximum number of global iterations.
+  
+  # Diversity Control
+  d_init: 0.6             # Initial diversity threshold (distance cutoff).
+  d_min: 0.1              # Minimum diversity threshold.
+  gamma: 0.990            # Annealing factor for distance cutoff (d_cut *= gamma per iteration).
+  
+  # Offspring Generation
+  n_cross_op1: 5          # Number of crossover offspring generated per seed pair.
+  n_cross_op2: 5          # Number of additional crossover offspring.
+  n_mut_op: 5             # Number of mutation offspring generated per seed.
+  early_stop_patience: 50 # Stop if no improvement for this many iterations (default: 10% of max_iter if null)
+
+  # Local Optimization (Hill Climbing)
+  #
+  # Algorithm: Greedy hill climbing applied to each candidate.
+  #   - For each step, generate N neighbors (mutations of current best)
+  #   - Evaluate all neighbors in a single GPU batch for efficiency
+  #   - Keep the best neighbor only if it improves the score
+  #   - Repeat until max_steps or no improvement
+  #
+  # Note: Steps are sequential (step N+1 starts from step N's result),
+  # but ALL candidates are processed together within each step to maximize GPU batch size.
+  #
+  local_optimization_enabled: false        # Set to true to enable local optimization (hill climbing).
+  local_optimization_frequency: 1          # Apply every N iterations (1 = every iteration).
+  local_optimization_max_steps: 3         # Maximum number of hill-climbing steps per candidate.
+  local_optimization_neighbors: 5         # Number of neighbors (mutations) generated per candidate per step.
+  
+
+# ------------------------------------------------------------------------------
+# Solution Representation
+# ------------------------------------------------------------------------------
+solution:
+  # Method Selection
+  # Options:
+  #   - fragment_route: Fragment-based synthesis route optimization (Method: rxnmol)
+  #   - smiles: Direct SMILES string optimization (Method: MolFinder)
+  spec_type: fragment_route
+
+  # Fragment-based Parameters (used when spec_type is fragment_route)
+  max_fragments: 5        # Maximum number of fragments in a synthesis route.
+  min_fragments: 2        # Minimum number of fragments in a synthesis route.
+  max_mol_size: null      # Maximum number of atoms allowed in the molecule.
+
+# ------------------------------------------------------------------------------
+# Data Sources
+# ------------------------------------------------------------------------------
+data:
+  # Directory containing data files. If paths below are relative, they are resolved relative to this.
+  data_dir: "data/"
+  
+  # File containing building blocks (fragments).
+  # Should be a SMILES file (.smi).
+  building_blocks_file: "enamine_fragments.smi" 
+  
+  # Directory for caching intermediate results (e.g., reaction products).
+  cache_path: "cache/reaction_cache.db"
+
+# ------------------------------------------------------------------------------
+# Genetic Operators
+# ------------------------------------------------------------------------------
+operators:
+  crossover_enabled: true # Enable crossover operations.
+  mutation_enabled: true  # Enable mutation operations.
+
+  crossover_prob: 0.5         # Probability of choosing crossover over mutation.
+  mutation_add_prob: 0.33     # Probability of 'add atom' mutation.
+  mutation_delete_prob: 0.33  # Probability of 'delete atom' mutation.
+  mutation_replace_prob: 0.34 # Probability of 'replace atom' mutation.
+
+# ------------------------------------------------------------------------------
+# Objective Function
+# ------------------------------------------------------------------------------
+objective:
+  # Name of the objective function to optimize.
+  # Common options:
+  #   - zaleplon, osimertinib, fexofenadine (Guacamol benchmarks)
+  #   - qed (Quantitative Estimation of Drug-likeness)
+  #   - logp (LogP coefficient)
+  #   - sa_score (Synthetic Accessibility Score)
+  name: zaleplon
+  
+
+
+# ------------------------------------------------------------------------------
+# Monitoring and Logging
+# ------------------------------------------------------------------------------
+monitoring:
+  save_interval: 1        # Save artifacts (banks, traces) every N iterations.
+  log_level: INFO         # Logging verbosity: DEBUG, INFO, WARNING, ERROR.
+  track_diversity: true   # Track and log population diversity metrics.
+  track_timing: true      # Track and log execution time.
+  track_operators: true   # Track and log operator usage statistics.
+
+# ------------------------------------------------------------------------------
+# Persistence (Saving Results)
+# ------------------------------------------------------------------------------
+persistence:
+  save_banks: true        # Save the population bank at each save interval.
+  save_traces: true       # Save synthesis traces (history of operations).
+  save_config: true       # Save the configuration used for the run.
+  save_metrics: true      # Save optimization metrics to CSV/JSON.
+  save_cache: true        # Save the reaction cache to disk.
+  
+  checkpoint_enabled: false # Enable periodic checkpointing for resuming runs.
+  checkpoint_interval: 50   # Create a checkpoint every N iterations.
+  
+  compress_banks: true    # Compress saved bank files (gzip) to save space.
+
+# ------------------------------------------------------------------------------
+# Runtime Execution
+# ------------------------------------------------------------------------------
+runtime:
+  random_seed: null       # Set a fixed integer seed for reproducibility. null = use system time.
+  num_workers: 1          # Number of parallel workers for evaluation.
+                          #   1: Serial execution
+                          #   >1: Parallel execution (multiprocessing)
+  device: cuda            # Computation device: 'cuda' or 'cpu'.
+  
+
+# ------------------------------------------------------------------------------
+# Output Configuration
+# ------------------------------------------------------------------------------
+# runs_dir: Base directory for all experiment runs
+# output_dir: Specific run directory name (auto-generated with timestamp if null)
+# Final path structure: {runs_dir}/{method}/{output_dir}
+runs_dir: ./runs
+output_dir: null

@@ -1,0 +1,25 @@
+# ==============================================================================
+# RxnMol Dependencies
+# ==============================================================================
+
+# Scientific Computing
+# Note: TDC requires numpy<2.0 and scikit-learn==1.2.2
+numpy>=1.24.0,<2.0
+scipy>=1.10.0
+scikit-learn==1.2.2
+
+# Chemistry
+rdkit>=2023.03.1
+
+# Deep Learning
+# Note: Install torch and torch-related packages with compatible versions
+# matching your CUDA version. See: https://pytorch.org/get-started/locally/
+sentencepiece>=0.1.99
+
+# Configuration & Utilities
+pyyaml>=6.0
+tqdm>=4.65.0
+
+# Benchmarks & Oracles
+guacamol>=0.5.4
+PyTDC==1.1.15

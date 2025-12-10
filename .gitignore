@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.claude/
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Output files
+output/
+results/
+*.log
+history
+bank_*.txt
+final_bank.txt
+all_newcomer.txt
+reaction_cache.json
+cycle_*_traces/
+
+# Large data files
+*.pt
+*.pth
+*.ckpt
+*.model
+*.vocab
+*.db
+
+# Compressed data files
+*.smi.gz
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+*.out
+out.*
+
+# ================================================
+# Project-specific ignores
+# ================================================
+
+# Development/experiment directories
+backups/
+MolFinder-original/
+junks/
+note-track/
+literature/
+manuscript/
+oracle/
+scripts/
+utils/
+workdir_*/
+cache/
+
+# Experiment runs
+run*/
+
+# Model weights directory (download separately)
+rxn_smiles_mit/
+
+# Development files
+*.md
+!README.md
+*.tex
+*.sh
+!run.py
+output*

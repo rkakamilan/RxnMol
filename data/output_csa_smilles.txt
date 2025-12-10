@@ -1,0 +1,1 @@
+python: can't open file '/home/alatoo/projects/fragments/molfinder-rxn-june4/synflownet/githuh_repo/data/run.py': [Errno 2] No such file or directory
