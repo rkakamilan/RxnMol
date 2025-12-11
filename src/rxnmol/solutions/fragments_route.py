@@ -415,7 +415,12 @@ class FragmentRouteSpec(SolutionSpec):
                 mol = max(mols, key=lambda m: m.GetNumAtoms())
 
             mol = self._neutralize_atoms(mol)
-            
+
+            # Check minimum size: must have at least one bond (no single atoms)
+            # Single atoms like [Mg], Cl, [Na] are byproducts, not valid products
+            if mol.GetNumBonds() == 0:
+                return None
+
             # Check size constraint
             if self.config.solution.max_mol_size is not None:
                 if mol.GetNumAtoms() > self.config.solution.max_mol_size:
