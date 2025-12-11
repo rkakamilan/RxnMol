@@ -454,3 +454,48 @@ register(
 #     aliases=['median2'],
 #     description='Intermediate properties between tadalafil and sildenafil'
 # )
+
+# -----------------------------------------------------------------------------
+# CSearch docking energy objectives (GNN-based, batch-capable)
+# Reference: Kim et al. "CSearch: chemical space search via virtual synthesis
+#            and global optimization" J Cheminform (2024)
+# -----------------------------------------------------------------------------
+register(
+    'mpro',
+    'rxnmol.objectives.objectives_csearch',
+    'MProObjective',
+    display_name='MPro (SARS-CoV-2)',
+    aliases=['6m0k', 'mpro_docking'],
+    supports_batch=True,
+    description='SARS-CoV-2 Main Protease docking energy (GNN proxy)'
+)
+
+register(
+    'btk',
+    'rxnmol.objectives.objectives_csearch',
+    'BTKObjective',
+    display_name='BTK Kinase',
+    aliases=['5p9h', 'btk_docking'],
+    supports_batch=True,
+    description='Tyrosine-protein kinase BTK docking energy (GNN proxy)'
+)
+
+register(
+    'alk',
+    'rxnmol.objectives.objectives_csearch',
+    'ALKObjective',
+    display_name='ALK Kinase',
+    aliases=['4mkc', 'alk_docking'],
+    supports_batch=True,
+    description='Anaplastic Lymphoma Kinase docking energy (GNN proxy)'
+)
+
+register(
+    'h1n1_na',
+    'rxnmol.objectives.objectives_csearch',
+    'H1N1NAObjective',
+    display_name='H1N1 Neuraminidase',
+    aliases=['3ti5', 'h1n1_docking', 'neuraminidase'],
+    supports_batch=True,
+    description='H1N1 Neuraminidase docking energy (GNN proxy)'
+)
