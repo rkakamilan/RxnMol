@@ -133,137 +133,161 @@ class FragmentRouteSpec(SolutionSpec):
         """
         Build phenotypes for a batch of candidates using GPU-accelerated batch prediction.
 
-        OPTIMIZED: Speculative batch prediction - predicts ALL possible first-level
-        reactions in ONE GPU call, then resolves dependencies level by level.
+        OPTIMIZED: Greedy cache resolution with batched GPU prediction.
 
-        This is much more efficient than the naive level-by-level approach because:
-        1. First level reactions (scaffold + fragment) can ALL be predicted at once
-        2. GPU utilization is maximized with larger batches
-        3. Cache is warmed up for future candidates with similar scaffolds
+        Algorithm:
+        1. Each candidate advances independently through cached reactions
+        2. When a candidate hits a cache miss, it's marked as 'blocked'
+        3. After all candidates are either complete, failed, or blocked:
+           - Collect ALL blocked reactions (deduplicated)
+           - Predict them in ONE GPU batch
+           - Update blocked candidates and continue
+
+        This maximizes GPU batch size and cache utilization by:
+        - Advancing cache-hit candidates immediately (no waiting)
+        - Batching ALL cache misses across ALL levels together
+        - Deduplicating identical reactions (predicted once, shared by multiple candidates)
         """
         if not candidates:
             return []
 
-        # Initialize state for candidates
+        # Initialize state for each candidate
+        # State dict is local to this method only
         states = []
-        for cand in candidates:
+        for i, cand in enumerate(candidates):
             frags = cand.genotype
             if not frags:
-                states.append({'failed': True, 'reason': "Empty fragment list"})
-                continue
-
-            states.append({
-                'current_product': frags[0],
-                'next_idx': 1,
-                'intermediates': [frags[0]],
-                'reactions': [],
-                'failed': False,
-                'reason': None
-            })
-
-        # Determine max steps needed
-        max_frags = max((len(c.genotype) for c in candidates if c.genotype), default=0)
-
-        # =====================================================================
-        # OPTIMIZATION: Speculative first-level prediction
-        # Predict ALL first-level reactions in one GPU batch
-        # =====================================================================
-        first_level_reactions = []  # (state_idx, r1, r2)
-        first_level_keys = []
-
-        for i, state in enumerate(states):
-            if state['failed']:
-                continue
-            frags = candidates[i].genotype
-            if len(frags) > 1:
-                r1 = frags[0]  # scaffold
-                r2 = frags[1]  # first building block
-                key = f"{r1}.{r2}"
-                first_level_reactions.append((i, r1, r2))
-                first_level_keys.append(key)
-
-        if first_level_keys:
-            # Single batch prediction for all first-level reactions
-            first_level_products = self._batch_predict_with_cache(
-                first_level_keys,
-                f"Level 1 (speculative, {len(first_level_keys)} reactions)"
-            )
-
-            # Update states with first-level results
-            for (state_idx, r1, r2), product_raw in zip(first_level_reactions, first_level_products):
-                state = states[state_idx]
-                if state['failed']:
-                    continue
-
-                product = self._validate_and_clean_product(product_raw)
-                if product:
-                    state['current_product'] = product
-                    state['intermediates'].append(product)
-                    state['reactions'].append(f"{r1}.{r2}>>{product}")
-                    state['next_idx'] = 2
-                else:
-                    state['failed'] = True
-                    state['reason'] = f"Reaction failed: {r1} + {r2} -> {product_raw}"
-
-        # =====================================================================
-        # Remaining levels: process in batches (these depend on previous results)
-        # =====================================================================
-        for step in range(2, max_frags):
-            reactions_needed = []
-            reaction_keys = []
-
-            for i, state in enumerate(states):
-                if state['failed']:
-                    continue
-
-                frags = candidates[i].genotype
-                if state['next_idx'] < len(frags):
-                    r1 = state['current_product']
-                    r2 = frags[state['next_idx']]
-                    reactions_needed.append((i, r1, r2))
-                    reaction_keys.append(f"{r1}.{r2}")
-
-            if not reactions_needed:
-                break
-
-            # Batch predict
-            products = self._batch_predict_with_cache(
-                reaction_keys,
-                f"Level {step} ({len(reaction_keys)} reactions)"
-            )
-
-            # Update states
-            for (state_idx, r1, r2), product_raw in zip(reactions_needed, products):
-                state = states[state_idx]
-                if state['failed']:
-                    continue
-
-                product = self._validate_and_clean_product(product_raw)
-                if product:
-                    state['current_product'] = product
-                    state['intermediates'].append(product)
-                    state['reactions'].append(f"{r1}.{r2}>>{product}")
-                    state['next_idx'] += 1
-                else:
-                    state['failed'] = True
-                    state['reason'] = f"Reaction failed: {r1} + {r2} -> {product_raw}"
-
-        # Finalize candidates
-        for i, cand in enumerate(candidates):
-            state = states[i]
-            if state['failed']:
-                cand.is_valid = False
-                cand.metadata['failure_reason'] = state['reason']
-                cand.phenotype_mol = None
-                cand.smiles = None
+                states.append({
+                    'idx': i,
+                    'fragments': [],
+                    'current_product': None,
+                    'next_frag_idx': 0,
+                    'intermediates': [],
+                    'reactions': [],
+                    'status': 'failed',
+                    'reason': 'Empty fragment list'
+                })
             else:
-                final_smi = state['current_product']
+                states.append({
+                    'idx': i,
+                    'fragments': frags,
+                    'current_product': frags[0],  # First fragment is the scaffold
+                    'next_frag_idx': 1,           # Next fragment to react with
+                    'intermediates': [frags[0]],
+                    'reactions': [],
+                    'status': 'active',
+                    'reason': None
+                })
+
+        # Main loop: greedy cache resolution + batched GPU prediction
+        iteration = 0
+        while any(s['status'] in ('active', 'blocked') for s in states):
+            iteration += 1
+
+            # =================================================================
+            # PHASE 1: Greedy cache resolution
+            # Advance each candidate as far as cache allows
+            # =================================================================
+            blocked = {}  # reaction_key -> [state_indices waiting for this reaction]
+
+            progress = True
+            while progress:
+                progress = False
+                keys_to_check = []
+                state_indices_for_keys = []
+
+                for i, s in enumerate(states):
+                    if s['status'] != 'active':
+                        continue
+
+                    # Check if candidate is complete
+                    if s['next_frag_idx'] >= len(s['fragments']):
+                        s['status'] = 'complete'
+                        continue
+
+                    # Build cache key for next reaction
+                    r1 = s['current_product']
+                    r2 = s['fragments'][s['next_frag_idx']]
+                    key = f"{r1}.{r2}"
+                    keys_to_check.append(key)
+                    state_indices_for_keys.append(i)
+
+                if not keys_to_check:
+                    break
+
+                # Batch cache lookup
+                products = self.reaction_cache.get_batch(keys_to_check)
+
+                for state_idx, key, product in zip(state_indices_for_keys, keys_to_check, products):
+                    s = states[state_idx]
+
+                    if product is not None:
+                        # Cache hit - validate and advance
+                        clean = self._validate_and_clean_product(product)
+                        if clean:
+                            s['current_product'] = clean
+                            s['intermediates'].append(clean)
+                            s['reactions'].append(f"{key}>>{clean}")
+                            s['next_frag_idx'] += 1
+                            progress = True  # Made progress, continue loop
+                        else:
+                            s['status'] = 'failed'
+                            s['reason'] = f"Invalid cached product: {product}"
+                    else:
+                        # Cache miss - mark as blocked
+                        s['status'] = 'blocked'
+                        blocked.setdefault(key, []).append(state_idx)
+
+            # =================================================================
+            # PHASE 2: Batch GPU prediction for ALL blocked reactions
+            # =================================================================
+            if not blocked:
+                break  # All candidates are complete or failed
+
+            # Deduplicate: each unique reaction is predicted only once
+            unique_keys = list(blocked.keys())
+
+            logger.debug(
+                f"Iteration {iteration}: {len(unique_keys)} unique reactions to predict "
+                f"(from {sum(len(v) for v in blocked.values())} blocked candidates)"
+            )
+
+            # Single GPU batch for all unique reactions
+            predicted_products = self._predict_missing_with_fallback(unique_keys)
+
+            # Cache the results
+            self.reaction_cache.set_batch(unique_keys, predicted_products)
+
+            # Update all blocked candidates
+            for key, product in zip(unique_keys, predicted_products):
+                clean = self._validate_and_clean_product(product)
+
+                for state_idx in blocked[key]:
+                    s = states[state_idx]
+                    if clean:
+                        s['current_product'] = clean
+                        s['intermediates'].append(clean)
+                        s['reactions'].append(f"{key}>>{clean}")
+                        s['next_frag_idx'] += 1
+                        s['status'] = 'active'  # Back to active for next iteration
+                    else:
+                        s['status'] = 'failed'
+                        s['reason'] = f"Prediction failed: {key} -> {product}"
+
+        # =================================================================
+        # Finalize candidates from states
+        # =================================================================
+        for s in states:
+            cand = candidates[s['idx']]
+
+            if s['status'] == 'complete':
+                final_smi = s['current_product']
                 mol = Chem.MolFromSmiles(final_smi)
                 if mol:
                     cand.smiles = final_smi
                     cand.phenotype_mol = mol
-                    cand.intermediates = state['intermediates']
-                    cand.metadata['reactions'] = state['reactions']
+                    cand.intermediates = s['intermediates']
+                    cand.metadata['reactions'] = s['reactions']
                     cand.is_valid = True
                     cand.fingerprint = AllChem.GetMorganFingerprintAsBitVect(
                         mol, radius=2, nBits=2048, useChirality=True
@@ -271,10 +295,21 @@ class FragmentRouteSpec(SolutionSpec):
                 else:
                     cand.is_valid = False
                     cand.metadata['failure_reason'] = f"Invalid final SMILES: {final_smi}"
+                    cand.phenotype_mol = None
+                    cand.smiles = None
+            else:
+                cand.is_valid = False
+                cand.metadata['failure_reason'] = s['reason'] or 'Unknown failure'
+                cand.phenotype_mol = None
+                cand.smiles = None
 
         valid_count = sum(1 for c in candidates if c.is_valid)
         invalid_count = len(candidates) - valid_count
-        logger.debug(f"✓ Build complete: {valid_count}/{len(candidates)} valid ({valid_count/len(candidates)*100:.1f}%), {invalid_count} failed")
+        logger.debug(
+            f"✓ Build complete: {valid_count}/{len(candidates)} valid "
+            f"({valid_count/len(candidates)*100:.1f}%), {invalid_count} failed, "
+            f"{iteration} iteration(s)"
+        )
 
         return candidates
 
