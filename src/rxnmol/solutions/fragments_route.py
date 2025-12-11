@@ -456,6 +456,18 @@ class FragmentRouteSpec(SolutionSpec):
             if mol.GetNumBonds() == 0:
                 return None
 
+            # Check for unsupported bond types (CSearch GNN only supports these 4)
+            # DATIVE bonds (metal-ligand) and other exotic types will crash the GNN
+            SUPPORTED_BOND_TYPES = {
+                Chem.BondType.SINGLE,
+                Chem.BondType.DOUBLE,
+                Chem.BondType.TRIPLE,
+                Chem.BondType.AROMATIC,
+            }
+            for bond in mol.GetBonds():
+                if bond.GetBondType() not in SUPPORTED_BOND_TYPES:
+                    return None
+
             # Check size constraint
             if self.config.solution.max_mol_size is not None:
                 if mol.GetNumAtoms() > self.config.solution.max_mol_size:
