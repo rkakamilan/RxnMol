@@ -37,7 +37,7 @@ class CSAConfig:
     bank_size: int = 100
     seed_size: int = 60
     max_iter: int = 100
-    d_init: float = 0.6
+    d_init: Optional[float] = 0.6  # If None, distance cutoff will be d_avg/2
     d_min: float = 0.1
     gamma: float = 0.990
     n_cross_op1: int = 5
@@ -57,8 +57,9 @@ class CSAConfig:
         """Validate CSA parameters."""
         assert 0 < self.seed_size <= self.bank_size, \
             f"seed_size ({self.seed_size}) must be > 0 and <= bank_size ({self.bank_size})"
-        assert 0 < self.d_min < self.d_init <= 1.0, \
-            f"Distance cutoffs invalid: d_min={self.d_min}, d_init={self.d_init}"
+        if self.d_init is not None:
+            assert 0 < self.d_min < self.d_init <= 1.0, \
+                f"Distance cutoffs invalid: d_min={self.d_min}, d_init={self.d_init}"
         assert 0 < self.gamma < 1.0, \
             f"Gamma ({self.gamma}) must be in (0, 1)"
         assert self.local_optimization_frequency > 0, \
@@ -458,6 +459,11 @@ class MasterConfig:
             # Set the value on the leaf attribute
             param = parts[-1]
             if hasattr(obj, param):
+                # Handle 'null' string -> None conversion
+                if str(value).lower() in ('null', 'none', '~'):
+                    setattr(obj, param, None)
+                    continue
+
                 # Cast to correct type
                 current = getattr(obj, param)
                 if current is not None:
