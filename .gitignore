@@ -84,11 +84,13 @@ literature/
 manuscript/
 oracle/
 scripts/
+!src/rxnmol/utils/
 utils/
 workdir_*/
 cache/
 
 # Experiment runs
+!src/rxnmol/runtime
 run*/
 
 # Model weights directory (download separately)
