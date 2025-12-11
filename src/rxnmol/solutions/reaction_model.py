@@ -188,11 +188,11 @@ class RxnPredictor:
             # Auto-configure batch size based on GPU memory
 
             if total_mem_gb < 12: # e.g. 11GB (2080Ti)
-                self.batch_size = 1536
+                self.batch_size = 1024
             elif total_mem_gb < 26: # e.g. 24GB (3090/4090/A5000)
-                self.batch_size = 3072
+                self.batch_size = 2048
             else: # e.g. 48GB (A6000) or 80GB (A100)
-                self.batch_size = 6096
+                self.batch_size = 4096
             logger.info(f"Auto-configured batch size: {self.batch_size} (based on {total_mem_gb:.1f}GB memory)")
         else:
             # CPU mode: use conservative batch size to avoid OOM
