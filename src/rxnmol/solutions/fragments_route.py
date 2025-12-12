@@ -456,7 +456,7 @@ class FragmentRouteSpec(SolutionSpec):
             if mol.GetNumBonds() == 0:
                 return None
 
-            # Check for unsupported bond types (CSearch GNN only supports these 4)
+            # Check for unsupported bond types (allow only organic/covalent bonds)
             # DATIVE bonds (metal-ligand) and other exotic types will crash the GNN
             SUPPORTED_BOND_TYPES = {
                 Chem.BondType.SINGLE,

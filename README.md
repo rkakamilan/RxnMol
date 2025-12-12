@@ -1,6 +1,6 @@
 # RxnMol: Fragment-Based Synthesis Path Optimization
 
-**A Data-Driven Approach to De Novo Molecular Design**
+**Synthesis-Aware Molecular Optimization: A Data-Driven Approach to de novo Molecular Generation**
 
 RxnMol is a novel molecular optimization framework that operates on **synthesis routes** rather than molecular structures directly. By representing candidates as ordered sequences of commercially available building blocks (fragments), RxnMol ensures that every generated molecule comes with a valid, step-by-step synthesis pathway predicted by a neural reaction model.
 
@@ -22,12 +22,8 @@ Traditional de novo design methods often generate "unmakeable" molecules. RxnMol
 ## Installation
 ### - Prerequisite: Install PyTorch & TensorRT
 The reaction predictor relies on **Torch-TensorRT** for fast inference code. You must install the version of PyTorch and TensorRT compatible with your specific CUDA version (e.g., CUDA 12.x).
-```bash
-# Install PyTorch and Torch-TensorRT for CUDA 12
-pip install torch torch-tensorrt --index-url https://download.pytorch.org/whl/cu126
-```
-> **Note**: Install `torch` and torch-related packages with compatible versions matching your CUDA version. See [pytorch.org](https://pytorch.org/get-started/locally/) for details.
 
+Recommend to setup a new environment before installing.
 ```bash
 # Clone the repository
 git clone https://github.com/snu-lcbc/RxnMol.git
@@ -35,11 +31,33 @@ cd RxnMol
 
 # Install dependencies
 pip install -r requirements.txt
+# Or if you need torch=2.4.0 wit cuda=12.1
+# pip install -r requirements_full.txt
 
 # Install the package in development mode
 pip install -e .
 ```
 > **Note**: TDC requires `numpy<2.0` and `scikit-learn==1.2.2`. These are pinned to avoid compatibility issues with TDC's pre-trained models.
+
+### Manual Installations:
+If you need to install a specific PyTorch and CUDA version (`torch=2.4.0` `cuda=12.1`): 
+```bash
+pip install torch==2.4.0 torch-tensorrt --extra-index-url https://download.pytorch.org/whl/cu121
+```
+> **Note**: Install `torch` and torch-related packages with compatible versions matching your CUDA version. See [pytorch.org](https://pytorch.org/get-started/locally/) for details.
+
+
+#### Extra GPU stacks for other methods used in this study.
+- **CSearch** needs DGL libs compatible with the same torch/CUDA:
+```bash
+pip install dgl==2.4.0 -f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
+```
+- **SynFlowNet** needs PyG libs matching torch 2.4.0 + CUDA 12.1:
+```bash
+pip install torch_geometric pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv \
+  -f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+```
+> These GPU libraries are ABI‑tied to specific CUDA/torch builds. If your CUDA version differs, use the corresponding wheel URLs/versions so everything stays compatible.
 
 ## Architecture
 
@@ -65,7 +83,7 @@ src/rxnmol/
 ### Running an Experiment
 
 ```bash
-python run.py --config configs.yaml --objective zaleplon
+python run.py --config configs.yaml --objective seh
 ```
 
 ### Configuration Example
@@ -76,15 +94,14 @@ csa:
   bank_size: 100
   seed_size: 60
   max_iter: 100
-  d_init: 0.6
 
 solution:
-  spec_type: fragment_route  # or "smiles" for direct SMILES optimization
+  spec_type: fragment_route  
   min_fragments: 2
   max_fragments: 5
 
 objective:
-  name: zaleplon  # Target molecule similarity
+  name: seh # name of objective functions 
 
 runtime:
   device: cuda    # Use GPU for reaction prediction
@@ -127,6 +144,11 @@ print(f"Synthesis Route: {best_candidate.genotype}")
 | TDC | `jnk3`, `gsk3b`, `drd2`, `seh`, ... |
 | Custom | Define your own via `ObjectiveFunction` base class |
 
+Check all available objective functions:
+```bash
+python src/rxnmol/objectives/registry.py
+```
+
 ## Model Weights
 
 The reaction prediction model weights are required for fragment-based optimization. Download from:
@@ -151,8 +173,8 @@ If you use RxnMol in your research, please cite:
 
 ```bibtex
 @article{rxnmol2025,
-  title={RxnMol: Fragment-Based Synthesis Path Optimization for De Novo Molecular Design},
-  author={RxnMol Team},
+  title={Synthesis-Aware Molecular Optimization: A Data-Driven Approach to de novo Molecular Generation},
+  author={Ashyrmamatov, Islambek and Ucak, Umit V. and Lee, Juyong},
   year={2025}
 }
 ```

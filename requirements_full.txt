@@ -12,8 +12,24 @@ scikit-learn==1.2.2
 rdkit>=2023.03.1
 
 # Deep Learning
-# Note: Install torch and torch-related packages with compatible versions
-# matching your CUDA version. See: https://pytorch.org/get-started/locally/
+# If you use a different CUDA/CPU setup, adjust the index URL and versions.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.4.0
+torch-tensorrt==2.4.0
+
+# CSearch related packages
+-f https://data.dgl.ai/wheels/torch-2.4/cu121/repo.html
+dgl==2.4.0
+  
+# SynFlowNet related packages
+-f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+torch_geometric
+pyg_lib
+torch_scatter
+torch_sparse
+torch_cluster
+torch_spline_conv
+
 sentencepiece>=0.1.99
 
 # Configuration & Utilities
