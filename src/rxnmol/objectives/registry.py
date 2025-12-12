@@ -499,3 +499,18 @@ register(
     supports_batch=True,
     description='H1N1 Neuraminidase docking energy (GNN proxy)'
 )
+
+
+# -----------------------------------------------------------------------------
+# CLI: python -m rxnmol.objectives.registry
+# -----------------------------------------------------------------------------
+if __name__ == "__main__":
+    print("Available Objective Functions:")
+    print("=" * 60)
+    for obj_id, display in sorted(list_objectives().items()):
+        info = _REGISTRY[obj_id]
+        print(f"  {obj_id:25} {display}")
+        if info.get('description'):
+            print(f"  {' ':25} {info['description']}")
+    print("=" * 60)
+    print(f"Total: {len(list_objectives())} objectives")
