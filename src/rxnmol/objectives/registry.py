@@ -272,6 +272,34 @@ register(
     description='CB1 receptor binding (min-max normalized)'
 )
 
+# CB1 × SA combined objectives
+register(
+    'cb1_raw_sa',
+    'rxnmol.objectives.objectives_synflownet',
+    'CB1RawSAObjective',
+    display_name='CB1 Raw × SA',
+    supports_batch=True,
+    description='Product of CB1 raw docking score (inverted) and SA (normalized 0-1, saturation at 3.5)'
+)
+
+register(
+    'cb1_zscore_sa',
+    'rxnmol.objectives.objectives_synflownet',
+    'CB1ZscoreSAObjective',
+    display_name='CB1 Z-Score × SA',
+    supports_batch=True,
+    description='Product of CB1 z-score (inverted) and SA (normalized 0-1, saturation at 3.5)'
+)
+
+register(
+    'cb1_minmax_sa',
+    'rxnmol.objectives.objectives_synflownet',
+    'CB1MinMaxSAObjective',
+    display_name='CB1 MinMax × SA',
+    supports_batch=True,
+    description='Product of CB1 min-max score [0-1] and SA (normalized 0-1, saturation at 3.5)'
+)
+
 # -----------------------------------------------------------------------------
 # TDC objectives (batch-capable via Oracle list input)
 # -----------------------------------------------------------------------------

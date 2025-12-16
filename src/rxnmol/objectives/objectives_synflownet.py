@@ -426,7 +426,140 @@ if HAS_SYNFLOWNET:
             preds = self._wrapper.predict(mols)
             return [-float(p) for p in preds]
 
-    
+    class CB1RawSAObjective(MolObjective):
+        """
+        Combined CB1 Raw docking score × Synthetic Accessibility objective.
+
+        Formula: score = -( (-CB1_raw) × SA_normalized )
+
+        - CB1 Raw: Raw docking score from MPNN proxy (kcal/mol scale).
+                   More negative = better binding. Inverted for multiplication.
+        - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
+              Clamped at SA=3.5 (already easy to synthesize).
+
+        The product rewards molecules that bind well AND are synthetically accessible.
+        """
+        supports_batch = True
+
+        def __init__(self, config=None, **kwargs):
+            super().__init__(config=config, **kwargs)
+            self.cb1 = CB1RawObjective(config)
+            self.sa = SynFlowSAObjective(config)
+
+        def compute(self, mol: Chem.Mol) -> float:
+            if not mol:
+                return 0.0
+            cb1_val = self.cb1.compute(mol)  # Raw value (minimize: more negative = better)
+            sa_val = self.sa.compute(mol)    # Negated (maximize: higher SA = easier synthesis)
+
+            # CB1 Raw: more negative = better binding, invert for product
+            cb1_pos = -cb1_val
+            sa_pos = -sa_val  # Revert SA negation
+
+            return -(cb1_pos * sa_pos)
+
+        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+            if not mols:
+                return []
+            cb1_scores = self.cb1.compute_batch(mols)
+            sa_scores = [self.sa.compute(m) for m in mols]
+            results = []
+            for cb1_val, sa_neg in zip(cb1_scores, sa_scores):
+                cb1_pos = -cb1_val
+                sa_pos = -sa_neg
+                results.append(-(cb1_pos * sa_pos))
+            return results
+
+    class CB1ZscoreSAObjective(MolObjective):
+        """
+        Combined CB1 Z-Score × Synthetic Accessibility objective.
+
+        Formula: score = -( (-CB1_zscore) × SA_normalized )
+
+        - CB1 Z-Score: Standardized docking score (mean=0, std=1).
+                       More negative = better binding. Inverted for multiplication.
+        - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
+              Clamped at SA=3.5 (already easy to synthesize).
+
+        The product rewards molecules that bind well AND are synthetically accessible.
+        """
+        supports_batch = True
+
+        def __init__(self, config=None, **kwargs):
+            super().__init__(config=config, **kwargs)
+            self.cb1 = CB1ZscoreObjective(config)
+            self.sa = SynFlowSAObjective(config)
+
+        def compute(self, mol: Chem.Mol) -> float:
+            if not mol:
+                return 0.0
+            cb1_val = self.cb1.compute(mol)  # Z-score (minimize: more negative = better)
+            sa_val = self.sa.compute(mol)    # Negated (maximize)
+
+            # Z-score: more negative = better binding, invert for product
+            cb1_pos = -cb1_val
+            sa_pos = -sa_val
+
+            return -(cb1_pos * sa_pos)
+
+        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+            if not mols:
+                return []
+            cb1_scores = self.cb1.compute_batch(mols)
+            sa_scores = [self.sa.compute(m) for m in mols]
+            results = []
+            for cb1_val, sa_neg in zip(cb1_scores, sa_scores):
+                cb1_pos = -cb1_val
+                sa_pos = -sa_neg
+                results.append(-(cb1_pos * sa_pos))
+            return results
+
+    class CB1MinMaxSAObjective(MolObjective):
+        """
+        Combined CB1 MinMax × Synthetic Accessibility objective.
+
+        Formula: score = -( CB1_minmax × SA_normalized )
+
+        - CB1 MinMax: Min-max normalized docking score [0,1].
+                      Higher = better binding (already in maximize form).
+        - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
+              Clamped at SA=3.5 (already easy to synthesize).
+
+        The product rewards molecules that bind well AND are synthetically accessible.
+        Both components are in [0,1] range, so the product is also [0,1].
+        """
+        supports_batch = True
+
+        def __init__(self, config=None, **kwargs):
+            super().__init__(config=config, **kwargs)
+            self.cb1 = CB1MinMaxObjective(config)
+            self.sa = SynFlowSAObjective(config)
+
+        def compute(self, mol: Chem.Mol) -> float:
+            if not mol:
+                return 0.0
+            cb1_val = self.cb1.compute(mol)  # Negated (maximize: higher = better)
+            sa_val = self.sa.compute(mol)    # Negated (maximize)
+
+            # Both are already negated for CSA, revert to positive for product
+            cb1_pos = -cb1_val
+            sa_pos = -sa_val
+
+            return -(cb1_pos * sa_pos)
+
+        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+            if not mols:
+                return []
+            cb1_scores = self.cb1.compute_batch(mols)
+            sa_scores = [self.sa.compute(m) for m in mols]
+            results = []
+            for cb1_neg, sa_neg in zip(cb1_scores, sa_scores):
+                cb1_pos = -cb1_neg
+                sa_pos = -sa_neg
+                results.append(-(cb1_pos * sa_pos))
+            return results
+
+
     class SynFlowQEDObjective(MolObjective):
         """QED using RDKit (wrapper for consistency)."""
         def compute(self, mol: Chem.Mol) -> float:
