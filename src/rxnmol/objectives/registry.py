@@ -231,7 +231,7 @@ register(
 register(
     'synflow_qed',
     'rxnmol.objectives.objectives_synflownet',
-    'SynFlowQEDObjective',
+    'SynflownetQEDObjective',
     display_name='SynFlow QED',
     description='QED with SynFlowNet normalization'
 )
@@ -239,7 +239,7 @@ register(
 register(
     'synflow_sa',
     'rxnmol.objectives.objectives_synflownet',
-    'SynFlowSAObjective',
+    'SynflownetSAObjective',
     display_name='SynFlow SA',
     description='SA with SynFlowNet normalization (threshold at 3.5)'
 )

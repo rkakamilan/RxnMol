@@ -38,76 +38,17 @@ sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
 import sascorer
 
 # =============================================================================
-# CB1 Model Download Configuration
+# Model Path Configuration
 # =============================================================================
 
-# Model URLs (to be provided later when uploaded to cloud storage)
-CB1_MODEL_URLS: Dict[str, Optional[str]] = {
-    'zscore': None,  # URL TBD
-    'raw': None,     # URL TBD
-    'minmax': None,  # URL TBD
-}
+# Models directory - override with RXNMOL_MODELS_DIR env var
+# Default: <project_root>/models/ (4 levels up from objectives_synflownet.py)
+MODELS_DIR = Path(os.environ.get(
+    'RXNMOL_MODELS_DIR',
+    Path(__file__).parent.parent.parent.parent / 'models'
+))
+PROXY_MODELS_DIR = MODELS_DIR / 'proxy'
 
-# Local cache directory for downloaded models
-MODEL_CACHE_DIR = Path(__file__).parent / "cache" / "models"
-
-# Default local paths for CB1 models (fallback if not in cache)
-CB1_DEFAULT_PATHS: Dict[str, str] = {
-    'zscore': '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_zscore_baseline.pt',
-    'raw': '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_raw_baseline.pt',
-    'minmax': '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_minmax_baseline.pt',
-}
-
-
-def get_cb1_model_path(model_type: str) -> Path:
-    """
-    Get path to CB1 model checkpoint, downloading if necessary.
-
-    Args:
-        model_type: One of 'zscore', 'raw', 'minmax'
-
-    Returns:
-        Path to the model checkpoint file
-
-    Raises:
-        FileNotFoundError: If model cannot be found or downloaded
-    """
-    if model_type not in CB1_MODEL_URLS:
-        raise ValueError(f"Unknown CB1 model type: {model_type}. Available: {list(CB1_MODEL_URLS.keys())}")
-
-    # Check cache directory first
-    cache_path = MODEL_CACHE_DIR / f"mpnn_{model_type}_baseline.pt"
-    if cache_path.exists():
-        return cache_path
-
-    # Check default local path
-    default_path = Path(CB1_DEFAULT_PATHS[model_type])
-    if default_path.exists():
-        return default_path
-
-    # Try to download if URL is available
-    url = CB1_MODEL_URLS[model_type]
-    if url is not None:
-        logger.info(f"Downloading CB1 {model_type} model from {url}")
-        MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        try:
-            import requests
-            response = requests.get(url, stream=True, timeout=60)
-            response.raise_for_status()
-            with open(cache_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            logger.info(f"Downloaded CB1 {model_type} model to {cache_path}")
-            return cache_path
-        except Exception as e:
-            logger.error(f"Failed to download CB1 {model_type} model: {e}")
-
-    raise FileNotFoundError(
-        f"CB1 {model_type} model not found. Checked:\n"
-        f"  - Cache: {cache_path}\n"
-        f"  - Default: {default_path}\n"
-        f"Download URL not yet configured. Please provide model checkpoint manually."
-    )
 
 
 # =============================================================================
@@ -167,7 +108,9 @@ class ProxyModelWrapper:
         if self.is_seh_original:
             # Load original SEH proxy
             logger.info(f"Loading original sEH model from Bengio2021Flow")
-            self._model = bengio2021flow.load_original_model()
+            self._model = bengio2021flow.load_original_model(
+                location= PROXY_MODELS_DIR / "bengio2021flow_proxy.pkl.gz",
+                )
             self._model.to(self.device)
             self._model.eval()
         else:
@@ -419,7 +362,7 @@ class CB1ZscoreObjective(MolObjective):
 
     def __init__(self, config=None, **kwargs):
         super().__init__(config=config, **kwargs)
-        self.model_path = str(get_cb1_model_path('zscore'))
+        self.model_path = PROXY_MODELS_DIR / 'cb1_zscore_model.pt'
         self._wrapper = None
 
     def compute(self, mol: Chem.Mol) -> float:
@@ -444,7 +387,7 @@ class CB1RawObjective(MolObjective):
 
     def __init__(self, config=None, **kwargs):
         super().__init__(config=config, **kwargs)
-        self.model_path = str(get_cb1_model_path('raw'))
+        self.model_path = PROXY_MODELS_DIR / 'cb1_raw_model.pt'
         self._wrapper = None
 
     def compute(self, mol: Chem.Mol) -> float:
@@ -469,7 +412,7 @@ class CB1MinMaxObjective(MolObjective):
 
     def __init__(self, config=None, **kwargs):
         super().__init__(config=config, **kwargs)
-        self.model_path = str(get_cb1_model_path('minmax'))
+        self.model_path = PROXY_MODELS_DIR / 'cb1_minmax_model.pt'
         self._wrapper = None
 
     def compute(self, mol: Chem.Mol) -> float:
@@ -485,7 +428,7 @@ class CB1MinMaxObjective(MolObjective):
         return [-float(p) for p in preds]
 
 
-class SynFlowQEDObjective(MolObjective):
+class SynFlowNetQEDObjective(MolObjective):
     """QED using RDKit (wrapper for consistency with SynFlowNet normalization)."""
 
     def compute(self, mol: Chem.Mol) -> float:
@@ -493,7 +436,7 @@ class SynFlowQEDObjective(MolObjective):
         return -QED.qed(mol) if mol else 0.0
 
 
-class SynFlowSAObjective(MolObjective):
+class SynflownetSAObjective(MolObjective):
     """
     Synthetic Accessibility Score (normalized 0-1).
 
@@ -542,7 +485,7 @@ class CB1RawSAObjective(MolObjective):
     def __init__(self, config=None, **kwargs):
         super().__init__(config=config, **kwargs)
         self.cb1 = CB1RawObjective(config)
-        self.sa = SynFlowSAObjective(config)
+        self.sa = SynflownetSAObjective(config)
 
     def compute(self, mol: Chem.Mol) -> float:
         if not mol:
@@ -587,7 +530,7 @@ class CB1ZscoreSAObjective(MolObjective):
     def __init__(self, config=None, **kwargs):
         super().__init__(config=config, **kwargs)
         self.cb1 = CB1ZscoreObjective(config)
-        self.sa = SynFlowSAObjective(config)
+        self.sa = SynflownetSAObjective(config)
 
     def compute(self, mol: Chem.Mol) -> float:
         if not mol:
@@ -633,7 +576,7 @@ class CB1MinMaxSAObjective(MolObjective):
     def __init__(self, config=None, **kwargs):
         super().__init__(config=config, **kwargs)
         self.cb1 = CB1MinMaxObjective(config)
-        self.sa = SynFlowSAObjective(config)
+        self.sa = SynflownetSAObjective(config)
 
     def compute(self, mol: Chem.Mol) -> float:
         if not mol:
@@ -717,7 +660,7 @@ class SEHSAObjective(MolObjective):
     def __init__(self, config=None, **kwargs):
         super().__init__(config=config, **kwargs)
         self.seh = SEHObjective(config)
-        self.sa = SynFlowSAObjective(config)
+        self.sa = SynflownetSAObjective(config)
 
     def compute(self, mol: Chem.Mol) -> float:
         s = self.seh.compute(mol)  # Already negated

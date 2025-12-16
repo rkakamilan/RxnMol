@@ -13,6 +13,7 @@ Reference:
     global optimization" J Cheminform (2024)
     https://github.com/seoklab/CSearch
 
+The GNN model architecture is adapted from CSearch (csearch_module.py).
 It handles lazy loading of heavy models to support multiprocessing.
 
 SCALING NOTES (to match CSearch paper Table 1 values):
@@ -20,77 +21,45 @@ SCALING NOTES (to match CSearch paper Table 1 values):
 The CSearch code applies TWO separate scalings to raw GNN predictions:
 
 1. energy_calculation.py (line 100-103):
-    https://github.com/seoklab/CSearch/blob/main/opps/energy_calculation.py#L100-L103
-
-   INTENDED behavior (but has a bug due to Python truthy evaluation):
-   ```python
-   if input_pdbid == '4MKC' or '3TI5' or '5P9H':  # BUG: always True!
-       pred_list = list(np.around(pred_list*10, 3))
-   else:
-       pred_list = list(np.around(pred_list, 3))  # 6M0K: no scaling
-   ```
    INTENDED: Only 4MKC, 3TI5, 5P9H get 10x; 6M0K gets 1x (no scaling)
-   ACTUAL (due to bug): ALL targets get 10x scaling
 
 2. CSearch.py write_bank() (line 327-330):
-   https://github.com/seoklab/CSearch/blob/main/CSearch.py#L327C1-L339C1
-   
-   ```python
-   if self.pdbid == '6M0K':
-       x = 10   # MPro: 10x for display
-   else:
-       x = 100  # Others: 100x for display
-   ```
-   Applied when writing CSV output to match paper scale.
+   6M0K: 10x, Others: 100x for display
 
 TOTAL SCALING to match paper Table 1 values:
-   Assuming INTENDED behavior (fixing the bug):
-   - 6M0K (MPro):     raw × 1  × 10  = 10x   → Paper: -156.0
+   - 6M0K (MPro):     raw × 10 × 10  = 100x  → Paper: -156.0
    - 5P9H (BTK):      raw × 10 × 100 = 1000x → Paper: -199.6
    - 4MKC (ALK):      raw × 10 × 100 = 1000x → Paper: -150.4
    - 3TI5 (H1N1_NA):  raw × 10 × 100 = 1000x → Paper: -148.7
-
-Example (Aspirin CC(=O)Oc1ccccc1C(=O)O):
-   - Raw GNN output:   ~-0.42 (MPro), ~-0.047 (BTK)
-   - With full scale:  -42 (MPro), -47 (BTK)
 """
 
-import sys
+import os
 import logging
 from pathlib import Path
 from typing import List, Optional, Union, Dict, Any
 
+import dgl
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from rdkit import Chem
 
 from .base import MolObjective
+from .csearch_module import MyModel, MyDataset, my_collate_fn
 
 logger = logging.getLogger(__name__)
 
 # =============================================================================
-# CSearch Path Setup
+# Model Path Configuration
 # =============================================================================
 
-CSEARCH_PATH = Path("/home/alatoo/projects/fragments/CSearch")
-CSEARCH_MODELS_PATH = CSEARCH_PATH / "opps" / "save"
-
-# Add CSearch libs to path for imports (not the opps package itself to avoid __init__ issues)
-if CSEARCH_PATH.exists():
-    # Add the opps/libs directory directly to avoid opps/__init__.py imports
-    sys.path.insert(0, str(CSEARCH_PATH / "opps"))
-
-try:
-    import dgl
-    # Import directly from libs submodule (not via opps package)
-    from libs.models import MyModel
-    from libs.io_inference import MyDataset, my_collate_fn
-    HAS_CSEARCH = True
-except ImportError as e:
-    logger.warning(f"Error importing CSearch modules: {e}")
-    logger.warning("CSearch dependencies not found. Docking energy objectives unavailable.")
-    HAS_CSEARCH = False
+# Models directory - override with RXNMOL_MODELS_DIR env var
+# Default: <project_root>/models/ (4 levels up from objectives_csearch.py)
+MODELS_DIR = Path(os.environ.get(
+    'RXNMOL_MODELS_DIR',
+    Path(__file__).parent.parent.parent.parent / 'models'
+))
+CSEARCH_MODELS_DIR = MODELS_DIR / 'csearch'
 
 
 # =============================================================================
@@ -116,12 +85,12 @@ class CSearchModelWrapper:
         'out_dim': 2,
     }
 
-    # PDB ID to model path mapping
-    MODEL_PATHS = {
-        '6M0K': CSEARCH_MODELS_PATH / '6M0K_gcn_128_pma_m2cdo.pth',  # MPro
-        '5P9H': CSEARCH_MODELS_PATH / '5P9H_gcn_128_pma_m2cdo.pth',  # BTK
-        '4MKC': CSEARCH_MODELS_PATH / '4MKC_gcn_128_pma_m2cdo.pth',  # ALK
-        '3TI5': CSEARCH_MODELS_PATH / '3TI5_gcn_128_pma_m2cdo.pth',  # H1N1_NA
+    # PDB ID to model filename mapping
+    MODEL_FILES = {
+        '6M0K': '6M0K_gcn_128_pma_m2cdo.pth',  # MPro
+        '5P9H': '5P9H_gcn_128_pma_m2cdo.pth',  # BTK
+        '4MKC': '4MKC_gcn_128_pma_m2cdo.pth',  # ALK
+        '3TI5': '3TI5_gcn_128_pma_m2cdo.pth',  # H1N1_NA
     }
 
     # Full scaling factors to match CSearch paper Table 1 values
@@ -161,9 +130,9 @@ class CSearchModelWrapper:
             min_batch_size: Minimum batch size before sequential fallback
             num_inference_passes: Number of forward passes to average (default 3)
         """
-        if pdbid not in self.MODEL_PATHS:
+        if pdbid not in self.MODEL_FILES:
             raise ValueError(
-                f"Invalid pdbid: {pdbid}. Choose from {list(self.MODEL_PATHS.keys())}"
+                f"Invalid pdbid: {pdbid}. Choose from {list(self.MODEL_FILES.keys())}"
             )
 
         self.pdbid = pdbid
@@ -200,9 +169,12 @@ class CSearchModelWrapper:
         if self._model is not None:
             return self._model
 
-        model_path = self.MODEL_PATHS[self.pdbid]
+        model_path = CSEARCH_MODELS_DIR / self.MODEL_FILES[self.pdbid]
         if not model_path.exists():
-            raise FileNotFoundError(f"Model checkpoint not found: {model_path}")
+            raise FileNotFoundError(
+                f"CSearch model not found: {model_path}\n"
+                f"Set RXNMOL_MODELS_DIR env var or place models in {CSEARCH_MODELS_DIR}"
+            )
 
         logger.info(f"Loading CSearch model for {self.pdbid} from {model_path}")
 
@@ -441,103 +413,98 @@ class CSearchModelWrapper:
 # Objectives
 # =============================================================================
 
-if HAS_CSEARCH:
 
-    class MProObjective(MolObjective):
-        """
-        SARS-CoV-2 Main Protease (MPro) docking energy prediction.
-        PDB: 6M0K
+class MProObjective(MolObjective):
+    """
+    SARS-CoV-2 Main Protease (MPro) docking energy prediction.
+    PDB: 6M0K
 
-        Lower scores indicate better predicted binding.
-        """
-        supports_batch = True
+    Lower scores indicate better predicted binding.
+    """
+    supports_batch = True
 
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            self._wrapper = None
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._wrapper = None
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if self._wrapper is None:
-                self._wrapper = CSearchModelWrapper(pdbid='6M0K')
-            # Lower docking energy is better -> return as-is for minimization
-            return self._wrapper.predict(mol)
+    def compute(self, mol: Chem.Mol) -> float:
+        if self._wrapper is None:
+            self._wrapper = CSearchModelWrapper(pdbid='6M0K')
+        return self._wrapper.predict(mol)
 
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if self._wrapper is None:
-                self._wrapper = CSearchModelWrapper(pdbid='6M0K')
-            return self._wrapper.predict(mols)
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if self._wrapper is None:
+            self._wrapper = CSearchModelWrapper(pdbid='6M0K')
+        return self._wrapper.predict(mols)
 
 
-    class BTKObjective(MolObjective):
-        """
-        Tyrosine-protein kinase BTK docking energy prediction.
-        PDB: 5P9H
+class BTKObjective(MolObjective):
+    """
+    Tyrosine-protein kinase BTK docking energy prediction.
+    PDB: 5P9H
 
-        Lower scores indicate better predicted binding.
-        """
-        supports_batch = True
+    Lower scores indicate better predicted binding.
+    """
+    supports_batch = True
 
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            self._wrapper = None
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._wrapper = None
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if self._wrapper is None:
-                self._wrapper = CSearchModelWrapper(pdbid='5P9H')
-            return self._wrapper.predict(mol)
+    def compute(self, mol: Chem.Mol) -> float:
+        if self._wrapper is None:
+            self._wrapper = CSearchModelWrapper(pdbid='5P9H')
+        return self._wrapper.predict(mol)
 
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if self._wrapper is None:
-                self._wrapper = CSearchModelWrapper(pdbid='5P9H')
-            return self._wrapper.predict(mols)
-
-
-    class ALKObjective(MolObjective):
-        """
-        Anaplastic Lymphoma Kinase (ALK) docking energy prediction.
-        PDB: 4MKC
-
-        Lower scores indicate better predicted binding.
-        """
-        supports_batch = True
-
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            self._wrapper = None
-
-        def compute(self, mol: Chem.Mol) -> float:
-            if self._wrapper is None:
-                self._wrapper = CSearchModelWrapper(pdbid='4MKC')
-            return self._wrapper.predict(mol)
-
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if self._wrapper is None:
-                self._wrapper = CSearchModelWrapper(pdbid='4MKC')
-            return self._wrapper.predict(mols)
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if self._wrapper is None:
+            self._wrapper = CSearchModelWrapper(pdbid='5P9H')
+        return self._wrapper.predict(mols)
 
 
-    class H1N1NAObjective(MolObjective):
-        """
-        H1N1 Neuraminidase docking energy prediction.
-        PDB: 3TI5
+class ALKObjective(MolObjective):
+    """
+    Anaplastic Lymphoma Kinase (ALK) docking energy prediction.
+    PDB: 4MKC
 
-        Lower scores indicate better predicted binding.
-        """
-        supports_batch = True
+    Lower scores indicate better predicted binding.
+    """
+    supports_batch = True
 
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-            self._wrapper = None
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._wrapper = None
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if self._wrapper is None:
-                self._wrapper = CSearchModelWrapper(pdbid='3TI5')
-            return self._wrapper.predict(mol)
+    def compute(self, mol: Chem.Mol) -> float:
+        if self._wrapper is None:
+            self._wrapper = CSearchModelWrapper(pdbid='4MKC')
+        return self._wrapper.predict(mol)
 
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if self._wrapper is None:
-                self._wrapper = CSearchModelWrapper(pdbid='3TI5')
-            return self._wrapper.predict(mols)
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if self._wrapper is None:
+            self._wrapper = CSearchModelWrapper(pdbid='4MKC')
+        return self._wrapper.predict(mols)
 
-else:
-    logger.warning("CSearch dependencies not found. Docking energy objectives unavailable.")
+
+class H1N1NAObjective(MolObjective):
+    """
+    H1N1 Neuraminidase docking energy prediction.
+    PDB: 3TI5
+
+    Lower scores indicate better predicted binding.
+    """
+    supports_batch = True
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._wrapper = None
+
+    def compute(self, mol: Chem.Mol) -> float:
+        if self._wrapper is None:
+            self._wrapper = CSearchModelWrapper(pdbid='3TI5')
+        return self._wrapper.predict(mol)
+
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if self._wrapper is None:
+            self._wrapper = CSearchModelWrapper(pdbid='3TI5')
+        return self._wrapper.predict(mols)
