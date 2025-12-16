@@ -1,19 +1,21 @@
 """
-SynFlowNet reward objective functions.
+MPNN-based proxy model objective functions.
 
-This module provides objectives from the SynFlowNet paper and related MPNN-based models.
-It integrates:
-- SEH (Soluble Epoxide Hydrolases) binding proxy
-- CB1 (Cannabinoid Receptor 1) binding affinity (VIP36 target)
-- QED and SA Score (via SynFlowNet utils or RDKit)
-- Vina docking (optional)
+This module provides objectives using MPNN (Message Passing Neural Network) proxy models:
+- SEH (Soluble Epoxide Hydrolases) binding proxy (from Bengio et al. 2021)
+- CB1 (Cannabinoid Receptor 1) binding affinity prediction
+- QED and SA Score (via RDKit)
+
+The MPNN model architecture is adapted from:
+    Bengio et al. (2021), 'Flow Network based Generative Models for
+    Non-Iterative Diverse Candidate Generation'
+    https://github.com/GFNOrg/synflownet
 
 It handles lazy loading of heavy models to support multiprocessing.
 """
 
 import os
 import sys
-import warnings
 import logging
 from pathlib import Path
 from typing import List, Optional, Union, Dict, Any
@@ -21,40 +23,101 @@ from typing import List, Optional, Union, Dict, Any
 import numpy as np
 import torch
 import torch_geometric.data as gd
-from rdkit import Chem
+from rdkit import Chem, RDConfig
 from rdkit.Chem import QED
 from torch import Tensor
 
 from .base import MolObjective
+from . import bengio2021flow
+from .bengio2021flow import MPNNet, mol2graph
 
 logger = logging.getLogger(__name__)
 
+# SA Score from RDKit contrib (same algorithm as synflownet sascore)
+sys.path.append(os.path.join(RDConfig.RDContribDir, 'SA_Score'))
+import sascorer
+
 # =============================================================================
-# SynFlowNet / MPNN Model Wrapper
+# CB1 Model Download Configuration
 # =============================================================================
 
-# Add the synflownet package to the path if it's not already installed
-# TODO: Later we add SynFlowNet as a proper dependency and import from there
-SYNFLOWNET_PATH = Path("/home/alatoo/projects/fragments/molfinder-rxn-synflownet/synflownet/src")
-if SYNFLOWNET_PATH.exists():
-    sys.path.insert(0, str(SYNFLOWNET_PATH))
+# Model URLs (to be provided later when uploaded to cloud storage)
+CB1_MODEL_URLS: Dict[str, Optional[str]] = {
+    'zscore': None,  # URL TBD
+    'raw': None,     # URL TBD
+    'minmax': None,  # URL TBD
+}
 
-# TODO: remove try except
-try:
-    from synflownet.models import bengio2021flow
-    from synflownet.models.bengio2021flow import MPNNet, mol2graph
-    from synflownet.utils import sascore
-    HAS_SYNFLOWNET = True
-except ImportError as e:
-    logger.warning(f"Error importing SynFlowNet modules: {e}")
-    logger.warning("SynFlowNet dependencies not found. sEH and CB1 objectives unavailable.")
-    HAS_SYNFLOWNET = False
-    raise e
+# Local cache directory for downloaded models
+MODEL_CACHE_DIR = Path(__file__).parent / "cache" / "models"
+
+# Default local paths for CB1 models (fallback if not in cache)
+CB1_DEFAULT_PATHS: Dict[str, str] = {
+    'zscore': '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_zscore_baseline.pt',
+    'raw': '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_raw_baseline.pt',
+    'minmax': '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_minmax_baseline.pt',
+}
 
 
-class SynFlowNetModelWrapper:
+def get_cb1_model_path(model_type: str) -> Path:
     """
-    Wrapper for SynFlowNet MPNN models (SEH, CB1, etc.).
+    Get path to CB1 model checkpoint, downloading if necessary.
+
+    Args:
+        model_type: One of 'zscore', 'raw', 'minmax'
+
+    Returns:
+        Path to the model checkpoint file
+
+    Raises:
+        FileNotFoundError: If model cannot be found or downloaded
+    """
+    if model_type not in CB1_MODEL_URLS:
+        raise ValueError(f"Unknown CB1 model type: {model_type}. Available: {list(CB1_MODEL_URLS.keys())}")
+
+    # Check cache directory first
+    cache_path = MODEL_CACHE_DIR / f"mpnn_{model_type}_baseline.pt"
+    if cache_path.exists():
+        return cache_path
+
+    # Check default local path
+    default_path = Path(CB1_DEFAULT_PATHS[model_type])
+    if default_path.exists():
+        return default_path
+
+    # Try to download if URL is available
+    url = CB1_MODEL_URLS[model_type]
+    if url is not None:
+        logger.info(f"Downloading CB1 {model_type} model from {url}")
+        MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            import requests
+            response = requests.get(url, stream=True, timeout=60)
+            response.raise_for_status()
+            with open(cache_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            logger.info(f"Downloaded CB1 {model_type} model to {cache_path}")
+            return cache_path
+        except Exception as e:
+            logger.error(f"Failed to download CB1 {model_type} model: {e}")
+
+    raise FileNotFoundError(
+        f"CB1 {model_type} model not found. Checked:\n"
+        f"  - Cache: {cache_path}\n"
+        f"  - Default: {default_path}\n"
+        f"Download URL not yet configured. Please provide model checkpoint manually."
+    )
+
+
+# =============================================================================
+# MPNN Proxy Model Wrapper
+# =============================================================================
+
+
+class ProxyModelWrapper:
+    """
+    Wrapper for MPNN proxy models (SEH, CB1, etc.).
     Handles lazy loading and batch inference with OOM recovery.
     """
 
@@ -322,364 +385,359 @@ class SynFlowNetModelWrapper:
 # Objectives
 # =============================================================================
 
-if HAS_SYNFLOWNET:
 
-    class SEHObjective(MolObjective):
-        """
-        SEH (Soluble Epoxide Hydrolase) binding affinity prediction.
-        Uses the original proxy model from SynFlowNet paper.
-        """
-        supports_batch = True
+class SEHObjective(MolObjective):
+    """
+    SEH (Soluble Epoxide Hydrolase) binding affinity prediction.
+    Uses the original proxy model from Bengio et al. (2021).
+    """
+    supports_batch = True
 
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            # Lazy initialization handled by wrapper
-            self._wrapper = None
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self._wrapper = None
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if self._wrapper is None:
-                self._wrapper = SynFlowNetModelWrapper(is_seh_original=True)
-            # Maximize SEH -> Return negative for CSA minimization
-            return -self._wrapper.predict(mol)
+    def compute(self, mol: Chem.Mol) -> float:
+        if self._wrapper is None:
+            self._wrapper = ProxyModelWrapper(is_seh_original=True)
+        # Maximize SEH -> Return negative for CSA minimization
+        return -self._wrapper.predict(mol)
 
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if self._wrapper is None:
-                self._wrapper = SynFlowNetModelWrapper(is_seh_original=True)
-            preds = self._wrapper.predict(mols)
-            return [-float(p) for p in preds]
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if self._wrapper is None:
+            self._wrapper = ProxyModelWrapper(is_seh_original=True)
+        preds = self._wrapper.predict(mols)
+        return [-float(p) for p in preds]
 
 
-    class CB1ZscoreObjective(MolObjective):
-        """
-        CB1 (Cannabinoid Receptor 1) binding affinity prediction.
-        Target: VIP36
-        Uses MPNN model trained on docking scores.
-        """
-        supports_batch = True
+class CB1ZscoreObjective(MolObjective):
+    """
+    CB1 (Cannabinoid Receptor 1) binding affinity prediction.
+    Uses MPNN model trained on docking scores (z-score normalized).
+    """
+    supports_batch = True
 
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            # TODO: when we publish the code, we need to update this path
-            self.model_path = '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_zscore_baseline.pt'          
-            self._wrapper = None
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.model_path = str(get_cb1_model_path('zscore'))
+        self._wrapper = None
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if self._wrapper is None:
-                self._wrapper = SynFlowNetModelWrapper(model_path=self.model_path, is_seh_original=False)
-            # Minimize Z-score -> Return raw value
-            return self._wrapper.predict(mol)
+    def compute(self, mol: Chem.Mol) -> float:
+        if self._wrapper is None:
+            self._wrapper = ProxyModelWrapper(model_path=self.model_path, is_seh_original=False)
+        # Minimize Z-score -> Return raw value
+        return self._wrapper.predict(mol)
 
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if self._wrapper is None:
-                self._wrapper = SynFlowNetModelWrapper(model_path=self.model_path, is_seh_original=False)
-            preds = self._wrapper.predict(mols)
-            return [float(p) for p in preds]
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if self._wrapper is None:
+            self._wrapper = ProxyModelWrapper(model_path=self.model_path, is_seh_original=False)
+        preds = self._wrapper.predict(mols)
+        return [float(p) for p in preds]
 
-    class CB1RawObjective(MolObjective):
-        """
-        CB1 (Cannabinoid Receptor 1) binding affinity prediction.
-        Target: VIP36
-        Uses MPNN model trained on docking scores.
-        """
-        supports_batch = True
 
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            # TODO: when we publish the code, we need to update this path
-            self.model_path = '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_raw_baseline.pt'          
-            self._wrapper = None
+class CB1RawObjective(MolObjective):
+    """
+    CB1 (Cannabinoid Receptor 1) binding affinity prediction.
+    Uses MPNN model trained on raw docking scores.
+    """
+    supports_batch = True
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if self._wrapper is None:
-                self._wrapper = SynFlowNetModelWrapper(model_path=self.model_path, is_seh_original=False)
-            # Minimize Raw Score -> Return raw value
-            return self._wrapper.predict(mol)
-        
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if self._wrapper is None:
-                self._wrapper = SynFlowNetModelWrapper(model_path=self.model_path, is_seh_original=False)
-            preds = self._wrapper.predict(mols)
-            return [float(p) for p in preds]
-            
-    
-    class CB1MinMaxObjective(MolObjective):
-        """
-        CB1 (Cannabinoid Receptor 1) binding affinity prediction
-        """
-        supports_batch = True
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.model_path = str(get_cb1_model_path('raw'))
+        self._wrapper = None
 
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            # TODO: when we publish the code, we need to update this path
-            self.model_path = '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_minmax_baseline.pt'
-            self._wrapper = None
+    def compute(self, mol: Chem.Mol) -> float:
+        if self._wrapper is None:
+            self._wrapper = ProxyModelWrapper(model_path=self.model_path, is_seh_original=False)
+        # Minimize Raw Score -> Return raw value
+        return self._wrapper.predict(mol)
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if self._wrapper is None:
-                self._wrapper = SynFlowNetModelWrapper(model_path=self.model_path, is_seh_original=False)
-            # Maximize MinMax Score -> Return negative
-            return -self._wrapper.predict(mol)
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if self._wrapper is None:
+            self._wrapper = ProxyModelWrapper(model_path=self.model_path, is_seh_original=False)
+        preds = self._wrapper.predict(mols)
+        return [float(p) for p in preds]
 
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if self._wrapper is None:
-                self._wrapper = SynFlowNetModelWrapper(model_path=self.model_path, is_seh_original=False)
-            preds = self._wrapper.predict(mols)
-            return [-float(p) for p in preds]
 
-    class CB1RawSAObjective(MolObjective):
-        """
-        Combined CB1 Raw docking score × Synthetic Accessibility objective.
+class CB1MinMaxObjective(MolObjective):
+    """
+    CB1 (Cannabinoid Receptor 1) binding affinity prediction.
+    Uses MPNN model trained on min-max normalized docking scores.
+    """
+    supports_batch = True
 
-        Formula: score = -( (-CB1_raw) × SA_normalized )
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.model_path = str(get_cb1_model_path('minmax'))
+        self._wrapper = None
 
-        - CB1 Raw: Raw docking score from MPNN proxy (kcal/mol scale).
+    def compute(self, mol: Chem.Mol) -> float:
+        if self._wrapper is None:
+            self._wrapper = ProxyModelWrapper(model_path=self.model_path, is_seh_original=False)
+        # Maximize MinMax Score -> Return negative
+        return -self._wrapper.predict(mol)
+
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if self._wrapper is None:
+            self._wrapper = ProxyModelWrapper(model_path=self.model_path, is_seh_original=False)
+        preds = self._wrapper.predict(mols)
+        return [-float(p) for p in preds]
+
+
+class SynFlowQEDObjective(MolObjective):
+    """QED using RDKit (wrapper for consistency with SynFlowNet normalization)."""
+
+    def compute(self, mol: Chem.Mol) -> float:
+        # Maximize QED -> Return negative
+        return -QED.qed(mol) if mol else 0.0
+
+
+class SynFlowSAObjective(MolObjective):
+    """
+    Synthetic Accessibility Score (normalized 0-1).
+
+    Uses SynFlowNet normalization where 3.5 is the saturation threshold:
+    - Raw SA > 10: Returns 0.0 (Very Hard)
+    - Raw SA = 3.5: Returns 1.0 (Perfect Score)
+    - Raw SA < 3.5: Returns 1.0 (Capped at Perfect)
+    """
+
+    def compute(self, mol: Chem.Mol) -> float:
+        if not mol:
+            return 0.0
+
+        raw_score = sascorer.calculateScore(mol)
+        # Transform to 0-1 (higher is better/easier)
+        # Reference: https://github.com/mirunacrt/synflownet/blob/main/src/synflownet/tasks/reactions_task.py#L137
+        normalized = (10 - raw_score) / (10 - 3.5)
+
+        # Clamp between [0, 1]
+        score = max(0.0, min(1.0, normalized))
+
+        # CSA minimizes -> Return negative to make "Higher Score" = "Lower Loss"
+        return -score
+
+
+# =============================================================================
+# CB1 × SA Combined Objectives
+# =============================================================================
+
+
+class CB1RawSAObjective(MolObjective):
+    """
+    Combined CB1 Raw docking score × Synthetic Accessibility objective.
+
+    Formula: score = -( (-CB1_raw) × SA_normalized )
+
+    - CB1 Raw: Raw docking score from MPNN proxy (kcal/mol scale).
+               More negative = better binding. Inverted for multiplication.
+    - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
+          Clamped at SA=3.5 (already easy to synthesize).
+
+    The product rewards molecules that bind well AND are synthetically accessible.
+    """
+    supports_batch = True
+
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.cb1 = CB1RawObjective(config)
+        self.sa = SynFlowSAObjective(config)
+
+    def compute(self, mol: Chem.Mol) -> float:
+        if not mol:
+            return 0.0
+        cb1_val = self.cb1.compute(mol)  # Raw value (minimize: more negative = better)
+        sa_val = self.sa.compute(mol)    # Negated (maximize: higher SA = easier synthesis)
+
+        # CB1 Raw: more negative = better binding, invert for product
+        cb1_pos = -cb1_val
+        sa_pos = -sa_val  # Revert SA negation
+
+        return -(cb1_pos * sa_pos)
+
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if not mols:
+            return []
+        cb1_scores = self.cb1.compute_batch(mols)
+        sa_scores = [self.sa.compute(m) for m in mols]
+        results = []
+        for cb1_val, sa_neg in zip(cb1_scores, sa_scores):
+            cb1_pos = -cb1_val
+            sa_pos = -sa_neg
+            results.append(-(cb1_pos * sa_pos))
+        return results
+
+
+class CB1ZscoreSAObjective(MolObjective):
+    """
+    Combined CB1 Z-Score × Synthetic Accessibility objective.
+
+    Formula: score = -( (-CB1_zscore) × SA_normalized )
+
+    - CB1 Z-Score: Standardized docking score (mean=0, std=1).
                    More negative = better binding. Inverted for multiplication.
-        - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
-              Clamped at SA=3.5 (already easy to synthesize).
+    - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
+          Clamped at SA=3.5 (already easy to synthesize).
 
-        The product rewards molecules that bind well AND are synthetically accessible.
-        """
-        supports_batch = True
+    The product rewards molecules that bind well AND are synthetically accessible.
+    """
+    supports_batch = True
 
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            self.cb1 = CB1RawObjective(config)
-            self.sa = SynFlowSAObjective(config)
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.cb1 = CB1ZscoreObjective(config)
+        self.sa = SynFlowSAObjective(config)
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if not mol:
-                return 0.0
-            cb1_val = self.cb1.compute(mol)  # Raw value (minimize: more negative = better)
-            sa_val = self.sa.compute(mol)    # Negated (maximize: higher SA = easier synthesis)
+    def compute(self, mol: Chem.Mol) -> float:
+        if not mol:
+            return 0.0
+        cb1_val = self.cb1.compute(mol)  # Z-score (minimize: more negative = better)
+        sa_val = self.sa.compute(mol)    # Negated (maximize)
 
-            # CB1 Raw: more negative = better binding, invert for product
+        # Z-score: more negative = better binding, invert for product
+        cb1_pos = -cb1_val
+        sa_pos = -sa_val
+
+        return -(cb1_pos * sa_pos)
+
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if not mols:
+            return []
+        cb1_scores = self.cb1.compute_batch(mols)
+        sa_scores = [self.sa.compute(m) for m in mols]
+        results = []
+        for cb1_val, sa_neg in zip(cb1_scores, sa_scores):
             cb1_pos = -cb1_val
-            sa_pos = -sa_val  # Revert SA negation
-
-            return -(cb1_pos * sa_pos)
-
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if not mols:
-                return []
-            cb1_scores = self.cb1.compute_batch(mols)
-            sa_scores = [self.sa.compute(m) for m in mols]
-            results = []
-            for cb1_val, sa_neg in zip(cb1_scores, sa_scores):
-                cb1_pos = -cb1_val
-                sa_pos = -sa_neg
-                results.append(-(cb1_pos * sa_pos))
-            return results
-
-    class CB1ZscoreSAObjective(MolObjective):
-        """
-        Combined CB1 Z-Score × Synthetic Accessibility objective.
-
-        Formula: score = -( (-CB1_zscore) × SA_normalized )
-
-        - CB1 Z-Score: Standardized docking score (mean=0, std=1).
-                       More negative = better binding. Inverted for multiplication.
-        - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
-              Clamped at SA=3.5 (already easy to synthesize).
-
-        The product rewards molecules that bind well AND are synthetically accessible.
-        """
-        supports_batch = True
-
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            self.cb1 = CB1ZscoreObjective(config)
-            self.sa = SynFlowSAObjective(config)
-
-        def compute(self, mol: Chem.Mol) -> float:
-            if not mol:
-                return 0.0
-            cb1_val = self.cb1.compute(mol)  # Z-score (minimize: more negative = better)
-            sa_val = self.sa.compute(mol)    # Negated (maximize)
-
-            # Z-score: more negative = better binding, invert for product
-            cb1_pos = -cb1_val
-            sa_pos = -sa_val
-
-            return -(cb1_pos * sa_pos)
-
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if not mols:
-                return []
-            cb1_scores = self.cb1.compute_batch(mols)
-            sa_scores = [self.sa.compute(m) for m in mols]
-            results = []
-            for cb1_val, sa_neg in zip(cb1_scores, sa_scores):
-                cb1_pos = -cb1_val
-                sa_pos = -sa_neg
-                results.append(-(cb1_pos * sa_pos))
-            return results
-
-    class CB1MinMaxSAObjective(MolObjective):
-        """
-        Combined CB1 MinMax × Synthetic Accessibility objective.
-
-        Formula: score = -( CB1_minmax × SA_normalized )
-
-        - CB1 MinMax: Min-max normalized docking score [0,1].
-                      Higher = better binding (already in maximize form).
-        - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
-              Clamped at SA=3.5 (already easy to synthesize).
-
-        The product rewards molecules that bind well AND are synthetically accessible.
-        Both components are in [0,1] range, so the product is also [0,1].
-        """
-        supports_batch = True
-
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            self.cb1 = CB1MinMaxObjective(config)
-            self.sa = SynFlowSAObjective(config)
-
-        def compute(self, mol: Chem.Mol) -> float:
-            if not mol:
-                return 0.0
-            cb1_val = self.cb1.compute(mol)  # Negated (maximize: higher = better)
-            sa_val = self.sa.compute(mol)    # Negated (maximize)
-
-            # Both are already negated for CSA, revert to positive for product
-            cb1_pos = -cb1_val
-            sa_pos = -sa_val
-
-            return -(cb1_pos * sa_pos)
-
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if not mols:
-                return []
-            cb1_scores = self.cb1.compute_batch(mols)
-            sa_scores = [self.sa.compute(m) for m in mols]
-            results = []
-            for cb1_neg, sa_neg in zip(cb1_scores, sa_scores):
-                cb1_pos = -cb1_neg
-                sa_pos = -sa_neg
-                results.append(-(cb1_pos * sa_pos))
-            return results
+            sa_pos = -sa_neg
+            results.append(-(cb1_pos * sa_pos))
+        return results
 
 
-    class SynFlowQEDObjective(MolObjective):
-        """QED using RDKit (wrapper for consistency)."""
-        def compute(self, mol: Chem.Mol) -> float:
-            # Maximize QED -> Return negative
-            return -QED.qed(mol) if mol else 0.0
+class CB1MinMaxSAObjective(MolObjective):
+    """
+    Combined CB1 MinMax × Synthetic Accessibility objective.
+
+    Formula: score = -( CB1_minmax × SA_normalized )
+
+    - CB1 MinMax: Min-max normalized docking score [0,1].
+                  Higher = better binding (already in maximize form).
+    - SA: Normalized to [0,1] using SynFlowNet formula: (10 - raw_SA) / 6.5
+          Clamped at SA=3.5 (already easy to synthesize).
+
+    The product rewards molecules that bind well AND are synthetically accessible.
+    Both components are in [0,1] range, so the product is also [0,1].
+    """
+    supports_batch = True
+
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.cb1 = CB1MinMaxObjective(config)
+        self.sa = SynFlowSAObjective(config)
+
+    def compute(self, mol: Chem.Mol) -> float:
+        if not mol:
+            return 0.0
+        cb1_val = self.cb1.compute(mol)  # Negated (maximize: higher = better)
+        sa_val = self.sa.compute(mol)    # Negated (maximize)
+
+        # Both are already negated for CSA, revert to positive for product
+        cb1_pos = -cb1_val
+        sa_pos = -sa_val
+
+        return -(cb1_pos * sa_pos)
+
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if not mols:
+            return []
+        cb1_scores = self.cb1.compute_batch(mols)
+        sa_scores = [self.sa.compute(m) for m in mols]
+        results = []
+        for cb1_neg, sa_neg in zip(cb1_scores, sa_scores):
+            cb1_pos = -cb1_neg
+            sa_pos = -sa_neg
+            results.append(-(cb1_pos * sa_pos))
+        return results
 
 
-    class SynFlowSAObjective(MolObjective):
-        """Synthetic Accessibility Score (normalized 0-1)."""
-        def compute(self, mol: Chem.Mol) -> float:
-            if not mol:
-                return 0.0
-            
-            raw_score = sascore.calculateScore(mol)
-            # Transform to 0-1 (higher is better/easier)
-            # ----------------
-            # SynFlowNet normalization: 
-            # 3.5 acts as a "Saturation Threshold" or "Good Enough" point.
-            # Range logic: 
-            #   - Raw SA > 10:  Returns 0.0 (Very Hard)
-            #   - Raw SA = 3.5: Returns 1.0 (Perfect Score)
-            #   - Raw SA < 3.5: Returns 1.0 (Capped at Perfect)
-            #
-            # Rationale: An SA score < 3.5 is already considered easily synthesizable 
-            # in medicinal chemistry. We clamp the reward here to prevent the 
-            # algorithm from "gaming the system" by generating trivially simple 
-            # molecules (e.g., methane, ethanol) just to get a raw score of 1.0.
-            # ----------------
-            # https://github.com/mirunacrt/synflownet/blob/main/src/synflownet/tasks/reactions_task.py#L137
-            normalized = (10 - raw_score) / (10 - 3.5) 
-            
-            # Clamp between [0, 1]
-            score = max(0.0, min(1.0, normalized))
+# =============================================================================
+# SEH Combined Objectives
+# =============================================================================
 
-            # CSA minimizes -> Return negative to make "Higher Score" = "Lower Loss"
-            return -score
-            
 
-    class SEHQEDObjective(MolObjective):
-        """
-        Combined SEH and QED objective.
-        SynFlowNet Logic: Reward = SEH_score * clamp(QED_score / 0.7)
-        """
-        supports_batch = True
+class SEHQEDObjective(MolObjective):
+    """
+    Combined SEH and QED objective.
+    Reward = SEH_score * clamp(QED_score / 0.7)
+    """
+    supports_batch = True
 
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            self.seh = SEHObjective(config)
-            # We don't strictly need self.qed as an object if we just use RDKit directly
-            # but keeping it is fine for consistency.
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.seh = SEHObjective(config)
 
-        def compute(self, mol: Chem.Mol) -> float:
-            if not mol:
-                return 0.0
+    def compute(self, mol: Chem.Mol) -> float:
+        if not mol:
+            return 0.0
+        raw_qed = QED.qed(mol)
+
+        # Normalize QED: If QED >= 0.7, this becomes 1.0
+        qed_norm = min(1.0, raw_qed / 0.7)
+
+        # Get sEH Score (negated)
+        s_neg = self.seh.compute(mol)
+        s_pos = -s_neg
+
+        # Combine: maximize (s_pos * qed_norm), CSA minimizes so return negative
+        return -(s_pos * qed_norm)
+
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if not mols:
+            return []
+        seh_scores = self.seh.compute_batch(mols)  # negated
+        results = []
+        for s_neg, mol in zip(seh_scores, mols):
+            if mol is None:
+                results.append(0.0)
+                continue
             raw_qed = QED.qed(mol)
-            
-            # 2. Normalize QED (The SynFlow logic)
-            # If QED >= 0.7, this becomes 1.0
             qed_norm = min(1.0, raw_qed / 0.7)
+            s_pos = -s_neg
+            results.append(-(s_pos * qed_norm))
+        return results
 
-            # 3. Get sEH Score 
-            # CAUTION: Ensure self.seh returns a NEGATED probability/score 
-            # so that -s_neg is a positive [0,1] value.
-            s_neg = self.seh.compute(mol)
-            s_pos = -s_neg 
 
-            # 4. Combine
-            # We want to maximize (s_pos * qed_norm)
-            # CSA minimizes, so we return negative
-            return -(s_pos * qed_norm)
+class SEHSAObjective(MolObjective):
+    """
+    Combined SEH and SA objective.
+    Returns: SEH * SA_normalized
+    """
+    supports_batch = True
 
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if not mols:
-                return []
-            seh_scores = self.seh.compute_batch(mols)  # negated
-            results = []
-            for s_neg, mol in zip(seh_scores, mols):
-                if mol is None:
-                    results.append(0.0)
-                    continue
-                raw_qed = QED.qed(mol)
-                qed_norm = min(1.0, raw_qed / 0.7)
-                s_pos = -s_neg
-                results.append(-(s_pos * qed_norm))
-            return results
+    def __init__(self, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self.seh = SEHObjective(config)
+        self.sa = SynFlowSAObjective(config)
 
-    class SEHSAObjective(MolObjective):
-        """
-        Combined SEH and SA objective.
-        Returns: SEH * SA_normalized
-        """
-        supports_batch = True
+    def compute(self, mol: Chem.Mol) -> float:
+        s = self.seh.compute(mol)  # Already negated
+        sa_val = self.sa.compute(mol)  # Already negated
 
-        def __init__(self, config=None, **kwargs):
-            super().__init__(config=config, **kwargs)
-            self.seh = SEHObjective(config)
-            self.sa = SynFlowSAObjective(config)
+        # Revert to positive
+        s_pos = -s
+        sa_pos = -sa_val
 
-        def compute(self, mol: Chem.Mol) -> float:
-            s = self.seh.compute(mol) # Already negated
-            sa_val = self.sa.compute(mol) # Already negated
-            
-            # Revert to positive
-            s_pos = -s
-            sa_pos = -sa_val
-            
-            # Maximize Product -> Return negative
-            return -(s_pos * sa_pos)
+        # Maximize Product -> Return negative
+        return -(s_pos * sa_pos)
 
-        def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
-            if not mols:
-                return []
-            seh_scores = self.seh.compute_batch(mols)  # negated
-            sa_scores = [self.sa.compute(m) for m in mols]  # negated
-            results = []
-            for s_neg, sa_neg in zip(seh_scores, sa_scores):
-                s_pos = -s_neg
-                sa_pos = -sa_neg
-                results.append(-(s_pos * sa_pos))
-            return results
-
-else:
-    logger.warning("SynFlowNet dependencies not found. SEH and CB1 objectives unavailable.")
+    def compute_batch(self, mols: List[Chem.Mol]) -> List[float]:
+        if not mols:
+            return []
+        seh_scores = self.seh.compute_batch(mols)  # negated
+        sa_scores = [self.sa.compute(m) for m in mols]  # negated
+        results = []
+        for s_neg, sa_neg in zip(seh_scores, sa_scores):
+            s_pos = -s_neg
+            sa_pos = -sa_neg
+            results.append(-(s_pos * sa_pos))
+        return results
