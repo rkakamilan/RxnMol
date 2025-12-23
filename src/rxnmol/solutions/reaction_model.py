@@ -95,7 +95,7 @@ class RxnPredictor:
 
         # Priority 1: Compiled model (fastest - already optimized)
         # IMPORTANT: Only try compiled model on CUDA - TensorRT models don't work on CPU
-        if device == 'cuda':
+        if device == 'cuda' and os.path.exists(compiled_path):
             try:
                 logger.info(f"Loading pre-compiled model from {compiled_path}")
                 # PyTorch 2.6 requires weights_only=False for compiled models (contains OptimizedModule)
@@ -109,43 +109,44 @@ class RxnPredictor:
                 model_loaded = True
                 logger.info(f"✓ Loaded compiled model in {time.time()-t0:.2f}s")
             except Exception as e:
-                logger.error(f"Failed to load compiled model: {e}")
-        else:
+                logger.warning(f"Failed to load compiled model (will try fallback): {e}")
+
+        if device != 'cuda':
             logger.info(f"Running on CPU - skipping TensorRT-compiled model")
-            
-            # Priority 2: Full model.pt (fast)
-            if model_path and os.path.exists(model_path):
-                logger.info(f"Loading full model from {model_path}")
-                self.model = torch.load(model_path, map_location=torch.device(device), weights_only=False)
-                model_loaded = True
-                logger.info(f"✓ Loaded model.pt in {time.time()-t0:.2f}s")
 
-            # Priority 3: Checkpoint (needs model reconstruction)
-            elif checkpoint_path and os.path.exists(checkpoint_path):
-                logger.info(f"Loading from checkpoint {checkpoint_path}")
-                checkpoint = torch.load(checkpoint_path, map_location=torch.device(device), weights_only=False)
-                self.model = Transformer(
-                    src_vocab_size=self.src_sp.get_piece_size(),
-                    trg_vocab_size=self.trg_sp.get_piece_size(),
-                    d_model=d_model,
-                    n_heads=num_heads,
-                    num_layers=num_layers,
-                    d_ff=d_ff,
-                    max_seq_len=seq_len,
-                )
-                self.model.load_state_dict(checkpoint['model_state_dict'])
-                self.model.to(device)
-                model_loaded = True
-                logger.info(f"✓ Loaded from checkpoint in {time.time()-t0:.2f}s")
+        # Priority 2: Full model.pt (fast) - fallback if compiled model failed or on CPU
+        if not model_loaded and model_path and os.path.exists(model_path):
+            logger.info(f"Loading full model from {model_path}")
+            self.model = torch.load(model_path, map_location=torch.device(device), weights_only=False)
+            model_loaded = True
+            logger.info(f"✓ Loaded model.pt in {time.time()-t0:.2f}s")
 
-            if not model_loaded:
-                raise ValueError(
-                    f"No valid model found. Searched for:\n"
-                    f"  1. {compiled_path} (compiled, fastest)\n"
-                    f"  2. {model_path} (full model)\n"
-                    f"  3. {checkpoint_path or 'N/A'} (checkpoint)\n"
-                    f"Please provide one of these files."
-                )
+        # Priority 3: Checkpoint (needs model reconstruction)
+        if not model_loaded and checkpoint_path and os.path.exists(checkpoint_path):
+            logger.info(f"Loading from checkpoint {checkpoint_path}")
+            checkpoint = torch.load(checkpoint_path, map_location=torch.device(device), weights_only=False)
+            self.model = Transformer(
+                src_vocab_size=self.src_sp.get_piece_size(),
+                trg_vocab_size=self.trg_sp.get_piece_size(),
+                d_model=d_model,
+                n_heads=num_heads,
+                num_layers=num_layers,
+                d_ff=d_ff,
+                max_seq_len=seq_len,
+            )
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            self.model.to(device)
+            model_loaded = True
+            logger.info(f"✓ Loaded from checkpoint in {time.time()-t0:.2f}s")
+
+        if not model_loaded:
+            raise ValueError(
+                f"No valid model found. Searched for:\n"
+                f"  1. {compiled_path} (compiled, fastest)\n"
+                f"  2. {model_path} (full model)\n"
+                f"  3. {checkpoint_path or 'N/A'} (checkpoint)\n"
+                f"Please provide one of these files."
+            )
         
         self.model.eval()
         
