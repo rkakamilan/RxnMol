@@ -566,10 +566,13 @@ def get_bond_feature(bond):
 
 
 def get_molecular_graph(smi):
-    #print('type:')
-    #print(type(smi))
-    #smi = str(smi)
-    mol = Chem.MolFromSmiles(str(smi))
+    # Handle both SMILES strings and RDKit Mol objects
+    if isinstance(smi, Chem.Mol):
+        mol = smi
+    else:
+        mol = Chem.MolFromSmiles(str(smi))
+    if mol is None:
+        return None
     graph = dgl.DGLGraph()
 
     atom_list = mol.GetAtoms()

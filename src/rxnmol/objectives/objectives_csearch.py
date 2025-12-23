@@ -222,7 +222,7 @@ class CSearchModelWrapper:
         )
 
         with torch.no_grad():
-            for graph in loader:
+            for graph, smi_list in loader:
                 graph = graph.to(self.device)
 
                 # Multiple forward passes and average (from CSearch)
