@@ -189,7 +189,7 @@ class MPNNet(nn.Module):
 
 def request():
     return requests.get(
-        "https://github.com/GFNOrg/synflownet/raw/master/mols/data/pretrained_proxy/best_params.pkl.gz",
+        "https://github.com/GFNOrg/gflownet/raw/master/mols/data/pretrained_proxy/best_params.pkl.gz",
         stream=True,
         timeout=30,
     )
