@@ -22,9 +22,11 @@ The CSearch code applies TWO separate scalings to raw GNN predictions:
 
 1. energy_calculation.py (line 100-103):
    INTENDED: Only 4MKC, 3TI5, 5P9H get 10x; 6M0K gets 1x (no scaling)
+   https://github.com/seoklab/CSearch/blob/main/opps/energy_calculation.py#L100C1-L103
 
 2. CSearch.py write_bank() (line 327-330):
    6M0K: 10x, Others: 100x for display
+   https://github.com/seoklab/CSearch/blob/main/CSearch.py#L327-L330
 
 TOTAL SCALING to match paper Table 1 values:
    - 6M0K (MPro):     raw × 10 × 10  = 100x  → Paper: -156.0

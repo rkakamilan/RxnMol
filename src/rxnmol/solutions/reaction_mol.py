@@ -17,7 +17,8 @@ from rdkit import RDLogger
 
 from .base import SolutionSpec, tanimoto_distance
 from ..core.data_models import Candidate, RunContext
-from .cache import PersistentReactionCache
+from .cache import PersistentReactionCache, compute_reaction_model_cache_id
+from .reaction_models import load_reaction_model
 from ..utils.building_blocks import load_building_blocks
 
 # Disable RDKit warnings
@@ -50,12 +51,29 @@ class ReactionMolSpec(SolutionSpec):
         self.building_blocks = self._load_building_blocks(self.building_blocks_file)
 
         # Persistent cache
-        self.reaction_cache = PersistentReactionCache(db_path=self.config.data.cache_path)
+        model_cache_id = compute_reaction_model_cache_id(self.config.reaction_model)
+        run_name = Path(self.config.output_dir).name if self.config.output_dir else None
+        shared_path = self.config.data.cache_path or "./cache/reaction_cache_shared.db"
+        self.reaction_cache = PersistentReactionCache(
+            shared_db_path=str(shared_path),
+            local_db_dir="./cache/local",
+            run_name=run_name,
+            model_id=model_cache_id,
+            auto_merge_on_close=self.config.persistence.cache_auto_merge,
+            auto_merge_delete=self.config.persistence.cache_auto_merge_delete,
+            cache_max_entries=self.config.persistence.cache_max_entries,
+        )
 
-        # Load reaction predictor immediately
-        logger.info("Loading reaction prediction model...")
-        self.rxn_predictor = self._load_reaction_model()
-        logger.info("Reaction prediction model loaded successfully")
+        # Load reaction predictor (shared via context)
+        self.rxn_predictor = context.reaction_model
+        if self.rxn_predictor is None:
+            logger.info("Loading reaction prediction model...")
+            self.rxn_predictor = load_reaction_model(
+                self.config.reaction_model,
+                device=self.config.runtime.device,
+            )
+            self.context.reaction_model = self.rxn_predictor
+        logger.info("Reaction prediction model ready")
         
         # Genetic operators
         self.crossover_ops = [self._crossover_react]
@@ -362,43 +380,6 @@ class ReactionMolSpec(SolutionSpec):
 
     def _load_building_blocks(self, building_blocks_file: str) -> List[str]:
         return load_building_blocks(building_blocks_file)
-
-    def _load_reaction_model(self):
-        # Reusing the loading logic from FragmentRouteSpec or similar
-        # Ideally this should be in a shared utility, but duplicating for now to avoid refactoring everything
-        import sys
-        import os
-        from pathlib import Path
-
-        parent_dir = Path(__file__).parent.parent.parent
-        if str(parent_dir) not in sys.path:
-            sys.path.insert(0, str(parent_dir))
-
-        from rxnmol.solutions.reaction_model import RxnPredictor
-        import torch
-
-        device = self.config.runtime.device
-        if device == "cuda" and not torch.cuda.is_available():
-            logger.warning("CUDA not available, falling back to CPU")
-            device = "cpu"
-
-        env_model_dir = os.environ.get("RXNMOL_MODEL_DIR")
-        if env_model_dir:
-            model_dir = Path(env_model_dir)
-        else:
-            model_dir = Path(__file__).parent.parent.parent.parent / "rxn_smiles_mit"
-        
-        checkpoint_path = model_dir / "atom_mit_checkpoint_last.pt"
-
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Reaction model checkpoint not found: {checkpoint_path}")
-
-        predictor = RxnPredictor(
-            model_dir=str(model_dir),
-            checkpoint_path=str(checkpoint_path),
-            device=device
-        )
-        return predictor
 
     def _validate_and_clean_product(self, product_smiles: str) -> Optional[str]:
         if not product_smiles or product_smiles == "FAILED":

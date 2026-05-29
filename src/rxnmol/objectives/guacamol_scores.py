@@ -1,8 +1,5 @@
-#!/bin/env python
+#!/usr/bin/env python
 import sys
-
-# gdir = "/home/juyong/projects_at_data1/MolFinder-de-novo/guacamol-master"
-# sys.path.append(gdir)
 
 from rdkit import Chem
 

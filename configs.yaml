@@ -12,9 +12,9 @@
 # CSA (Conformational Space Annealing) Algorithm Parameters
 # ------------------------------------------------------------------------------
 csa:
-  bank_size: 100          # Population size (N). The number of solutions kept in the bank.
-  seed_size: 60           # Number of seeds selected per iteration (M).
-  max_iter: 100           # Maximum number of global iterations.
+  bank_size: 1000         # Population size (N). The number of solutions kept in the bank.
+  seed_size: 600          # Number of seeds selected per iteration (M).
+  max_iter: 500           # Maximum number of global iterations.
   
   # Diversity Control
   d_init: 0.6             # Initial diversity threshold (distance cutoff).
@@ -118,6 +118,9 @@ persistence:
   save_config: true       # Save the configuration used for the run.
   save_metrics: true      # Save optimization metrics to CSV/JSON.
   save_cache: true        # Save the reaction cache to disk.
+  cache_auto_merge: false  # Auto-merge local caches into shared cache on job exit.
+  cache_auto_merge_delete: false  # Delete local cache after merge.
+  cache_max_entries: 5000000  # Prune shared cache to most recent inserts after merge.
   
   checkpoint_enabled: false # Enable periodic checkpointing for resuming runs.
   checkpoint_interval: 50   # Create a checkpoint every N iterations.
@@ -133,7 +136,38 @@ runtime:
                           #   1: Serial execution
                           #   >1: Parallel execution (multiprocessing)
   device: cuda            # Computation device: 'cuda' or 'cpu'.
+  require_cuda: true      # Fail fast if CUDA is unavailable.
   
+# ------------------------------------------------------------------------------
+# Reaction Model
+# ------------------------------------------------------------------------------
+reaction_model:
+  # Select reaction model adapter
+  #   - transformer_v1: legacy SentencePiece transformer (reaction_model.py)
+  #   - transformer_v2: new transformer repo (predictor API)
+  provider: transformer_v2
+
+  # Paths. transformer_v2 loads model.pt + tokenizer.json + config.resolved.json from model_dir.
+  # The transformer architecture is vendored, so repo_path is optional.
+  model_dir: models/reaction   # default ft_synthetic_mix90_10. Or set env RXNMOL_MODEL_DIR.
+  checkpoint_path: null   # Optional explicit checkpoint override.
+  tokenizer_path: null    # Optional explicit tokenizer.json override.
+  repo_path: null         # Optional: external reaction-model repo; default uses vendored architecture.
+
+  # Inference settings
+  batch_size: null        # null = auto-configure (when supported)
+  max_len: 256
+  beam_size: 1            # 1 = greedy (default)
+  length_penalty: 1.0
+  task: forward
+
+  # Legacy settings (v1)
+  enforce_cuda: true
+
+  # Compilation (v2)
+  compile: true
+  compile_backend: inductor
+  compile_mode: reduce-overhead
 
 # ------------------------------------------------------------------------------
 # Output Configuration
@@ -141,5 +175,5 @@ runtime:
 # runs_dir: Base directory for all experiment runs
 # output_dir: Specific run directory name (auto-generated with timestamp if null)
 # Final path structure: {runs_dir}/{method}/{output_dir}
-runs_dir: ./runs
+runs_dir: ./runs/uspto_mit_v2/
 output_dir: null

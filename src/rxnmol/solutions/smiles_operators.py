@@ -67,29 +67,6 @@ bond_tokens = {"#", ".", "=", "[", "]"}
 num_tokens = [str(i) for i in range(1, 10)]
 
 
-# def chk_token(filename_):
-#     path_ = '/home/yongbeom/research/gen_smiles'
-#     if os.path.exists(f'{path_}/token.list'):
-#         with open(f'{path_}/token.list') as _if:
-#             token = _if.read().split(',')
-#             # print(token)
-#             token = set(token)
-#     else:
-#         token = {}
-
-#     with open(filename_) as f:
-#         for l in f:
-#             smiles, cid = l.strip().split()
-#             print(smiles, cid)
-#             if len(set(list(smiles)) - token) > 0:
-#                 token.update(set(list(smiles)) - token)
-
-#     token = sorted(token)
-
-#     with open(f'{path_}/token.list', 'w') as of:
-#         of.write(','.join(token))
-
-
 def set_avoid_ring(_smiles):
     avoid_ring = []
     ring_tmp = set(re.findall(r"\d", _smiles))

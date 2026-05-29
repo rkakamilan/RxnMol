@@ -116,12 +116,11 @@ class ProxyModelWrapper:
         else:
             # Load custom MPNN checkpoint (e.g. CB1)
             if not self.model_path or not Path(self.model_path).exists():
-                 # Fallback for CB1 if path not provided
-                 default_cb1 = '/home/alatoo/projects/fragments/docking/prediction_model/models/mpnn_zscore_baseline.pt'
-                 if Path(default_cb1).exists():
-                     self.model_path = default_cb1
-                 else:
-                     raise FileNotFoundError(f"Model path not found: {self.model_path}")
+                 raise FileNotFoundError(
+                     f"Proxy model checkpoint not found: {self.model_path}. "
+                     "Provide a valid model_path, or set the RXNMOL_MODELS_DIR env var "
+                     "to the directory containing the proxy model weights."
+                 )
 
             logger.info(f"Loading Proxy model from: {self.model_path}")
             checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)

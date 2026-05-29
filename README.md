@@ -153,15 +153,8 @@ python src/rxnmol/objectives/registry.py
 
 The reaction prediction model weights are required for fragment-based optimization. Download from:
 
-- [Model weights (Zenodo/HuggingFace link)] - *Coming soon*
+- [Model weights (link)] - *Coming soon*
 
-Place the downloaded files in `rxn_smiles_mit/`:
-```
-rxn_smiles_mit/
-├── model_compiled.pt
-├── tokenizer_src.model
-└── tokenizer_trg.model
-```
 
 ## License
 

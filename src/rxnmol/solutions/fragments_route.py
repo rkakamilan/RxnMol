@@ -17,7 +17,8 @@ from rdkit import RDLogger
 
 from .base import SolutionSpec, tanimoto_distance
 from ..core.data_models import Candidate, RunContext
-from .cache import PersistentReactionCache
+from .cache import PersistentReactionCache, compute_reaction_model_cache_id
+from .reaction_models import load_reaction_model
 from ..utils.building_blocks import load_building_blocks
 
 # Disable RDKit warnings
@@ -53,18 +54,29 @@ class FragmentRouteSpec(SolutionSpec):
         # - If local DB exists (resume), loads into memory at startup
         # - After all experiments complete, run: python -m rxnmol.solutions.cache merge
         # Use just the last directory name from output_dir (e.g., "seh_mf2-5_r1")
+        model_cache_id = compute_reaction_model_cache_id(self.config.reaction_model)
         run_name = Path(self.config.output_dir).name if self.config.output_dir else None
         self.reaction_cache = PersistentReactionCache(
             shared_db_path="./cache/reaction_cache_shared.db",
             local_db_dir="./cache/local",
             run_name=run_name,
             copy_shared_to_local=False,  # Disabled - local copies caused Bus errors
+            model_id=model_cache_id,
+            auto_merge_on_close=self.config.persistence.cache_auto_merge,
+            auto_merge_delete=self.config.persistence.cache_auto_merge_delete,
+            cache_max_entries=self.config.persistence.cache_max_entries,
         )
 
-        # Load reaction predictor immediately (NOT lazy)
-        logger.info("Loading reaction prediction model...")
-        self.rxn_predictor = self._load_reaction_model()
-        logger.info("Reaction prediction model loaded successfully")
+        # Load reaction predictor (shared via context)
+        self.rxn_predictor = context.reaction_model
+        if self.rxn_predictor is None:
+            logger.info("Loading reaction prediction model...")
+            self.rxn_predictor = load_reaction_model(
+                self.config.reaction_model,
+                device=self.config.runtime.device,
+            )
+            self.context.reaction_model = self.rxn_predictor
+        logger.info("Reaction prediction model ready")
         
         # Genetic operators
         # Both crossover operators produce 2 children each (swap both halves)
@@ -392,45 +404,6 @@ class FragmentRouteSpec(SolutionSpec):
     def _load_building_blocks(self, building_blocks_file: str) -> List[str]:
         logger.debug(f"Loading building blocks from: {building_blocks_file}")
         return load_building_blocks(building_blocks_file)
-
-    def _load_reaction_model(self):
-        import sys
-        import os
-        from pathlib import Path
-
-        # Add parent directory to path to import reaction_model
-        parent_dir = Path(__file__).parent.parent.parent
-        if str(parent_dir) not in sys.path:
-            sys.path.insert(0, str(parent_dir))
-
-        from rxnmol.solutions.reaction_model import RxnPredictor
-        import torch
-
-        device = self.config.runtime.device
-        if device == "cuda" and not torch.cuda.is_available():
-            logger.warning("CUDA not available, falling back to CPU")
-            device = "cpu"
-
-        # Check environment variable first
-        env_model_dir = os.environ.get("RXNMOL_MODEL_DIR")
-        if env_model_dir:
-            model_dir = Path(env_model_dir)
-            logger.info(f"Using model directory from RXNMOL_MODEL_DIR: {model_dir}")
-        else:
-            # Fallback to relative path (dev mode)
-            model_dir = Path(__file__).parent.parent.parent.parent / "rxn_smiles_mit"
-        
-        checkpoint_path = model_dir / "atom_mit_checkpoint_last.pt"
-
-        if not checkpoint_path.exists():
-            raise FileNotFoundError(f"Reaction model checkpoint not found: {checkpoint_path}")
-
-        predictor = RxnPredictor(
-            model_dir=str(model_dir),
-            checkpoint_path=str(checkpoint_path),
-            device=device
-        )
-        return predictor
 
     def _validate_and_clean_product(self, product_smiles: str) -> Optional[str]:
         if not product_smiles or product_smiles == "FAILED":

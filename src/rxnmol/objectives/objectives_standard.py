@@ -78,7 +78,7 @@ class SAScoreObjective(MolObjective):
     - 1 = very easy to synthesize
     - 10 = very difficult to synthesize
 
-    We normalize to [0, 1] where higher = easier to synthesize.
+    CSA minimizes this directly, so lower raw SA = easier = better.
 
     Reference:
         Ertl & Schuffenhauer (2009). Estimation of synthetic accessibility score
@@ -91,17 +91,8 @@ class SAScoreObjective(MolObjective):
         super().__init__(name=name, validity_penalty=validity_penalty, config=config)
 
     def compute(self, mol: Chem.Mol) -> float:
-        """Compute normalized SA score."""
-        # Compute raw SA score [1, 10]
-        raw_score = sascorer.calculateScore(mol)
-
-        # Transform to [0, 1] range (higher = easier = better)
-        # We use 1 as min and 10 as max
-        normalized = (10 - raw_score) / (10 - 1)
-
-        # Clamp to [0, 1]
-        # Maximize SA -> Return negative
-        return -max(0.0, min(1.0, normalized))
+        """Compute raw SA score [1, 10]. CSA minimizes → finds easiest to synthesize."""
+        return sascorer.calculateScore(mol)
 
 
 # =============================================================================

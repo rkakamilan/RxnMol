@@ -528,6 +528,160 @@ register(
     description='H1N1 Neuraminidase docking energy (GNN proxy)'
 )
 
+# -----------------------------------------------------------------------------
+# Constrained docking objectives: docking × property penalty
+# MW penalty: linear decay from 1.0 at MW ≤ 500 Da to 0.0 at MW ≥ 800 Da
+# Lipinski penalty: (4 - n_violations) / 4
+# -----------------------------------------------------------------------------
+
+# MPNN-Docking × MW
+register(
+    'seh_mw',
+    'rxnmol.objectives.objectives_constrained',
+    'SEHMWObjective',
+    display_name='sEH × MW',
+    supports_batch=True,
+    description='sEH binding penalized by molecular weight (MW > 500 Da)'
+)
+
+register(
+    'cb1_raw_mw',
+    'rxnmol.objectives.objectives_constrained',
+    'CB1RawMWObjective',
+    display_name='CB1 Raw × MW',
+    supports_batch=True,
+    description='CB1 raw docking penalized by molecular weight'
+)
+
+register(
+    'cb1_zscore_mw',
+    'rxnmol.objectives.objectives_constrained',
+    'CB1ZscoreMWObjective',
+    display_name='CB1 ZScore × MW',
+    supports_batch=True,
+    description='CB1 z-score docking penalized by molecular weight'
+)
+
+register(
+    'cb1_minmax_mw',
+    'rxnmol.objectives.objectives_constrained',
+    'CB1MinMaxMWObjective',
+    display_name='CB1 MinMax × MW',
+    supports_batch=True,
+    description='CB1 min-max docking penalized by molecular weight'
+)
+
+# GNN-Docking × MW
+register(
+    'mpro_mw',
+    'rxnmol.objectives.objectives_constrained',
+    'MProMWObjective',
+    display_name='MPro × MW',
+    supports_batch=True,
+    description='MPro docking penalized by molecular weight'
+)
+
+register(
+    'btk_mw',
+    'rxnmol.objectives.objectives_constrained',
+    'BTKMWObjective',
+    display_name='BTK × MW',
+    supports_batch=True,
+    description='BTK docking penalized by molecular weight'
+)
+
+register(
+    'alk_mw',
+    'rxnmol.objectives.objectives_constrained',
+    'ALKMWObjective',
+    display_name='ALK × MW',
+    supports_batch=True,
+    description='ALK docking penalized by molecular weight'
+)
+
+register(
+    'h1n1_na_mw',
+    'rxnmol.objectives.objectives_constrained',
+    'H1N1NAMWObjective',
+    display_name='H1N1 NA × MW',
+    supports_batch=True,
+    description='H1N1 NA docking penalized by molecular weight'
+)
+
+# MPNN-Docking × Lipinski
+register(
+    'seh_lipinski',
+    'rxnmol.objectives.objectives_constrained',
+    'SEHLipinskiObjective',
+    display_name='sEH × Lipinski',
+    supports_batch=True,
+    description='sEH binding penalized by Lipinski rule-of-5 violations'
+)
+
+register(
+    'cb1_raw_lipinski',
+    'rxnmol.objectives.objectives_constrained',
+    'CB1RawLipinskiObjective',
+    display_name='CB1 Raw × Lipinski',
+    supports_batch=True,
+    description='CB1 raw docking penalized by Lipinski violations'
+)
+
+register(
+    'cb1_zscore_lipinski',
+    'rxnmol.objectives.objectives_constrained',
+    'CB1ZscoreLipinskiObjective',
+    display_name='CB1 ZScore × Lipinski',
+    supports_batch=True,
+    description='CB1 z-score docking penalized by Lipinski violations'
+)
+
+register(
+    'cb1_minmax_lipinski',
+    'rxnmol.objectives.objectives_constrained',
+    'CB1MinMaxLipinskiObjective',
+    display_name='CB1 MinMax × Lipinski',
+    supports_batch=True,
+    description='CB1 min-max docking penalized by Lipinski violations'
+)
+
+# GNN-Docking × Lipinski
+register(
+    'mpro_lipinski',
+    'rxnmol.objectives.objectives_constrained',
+    'MProLipinskiObjective',
+    display_name='MPro × Lipinski',
+    supports_batch=True,
+    description='MPro docking penalized by Lipinski violations'
+)
+
+register(
+    'btk_lipinski',
+    'rxnmol.objectives.objectives_constrained',
+    'BTKLipinskiObjective',
+    display_name='BTK × Lipinski',
+    supports_batch=True,
+    description='BTK docking penalized by Lipinski violations'
+)
+
+register(
+    'alk_lipinski',
+    'rxnmol.objectives.objectives_constrained',
+    'ALKLipinskiObjective',
+    display_name='ALK × Lipinski',
+    supports_batch=True,
+    description='ALK docking penalized by Lipinski violations'
+)
+
+register(
+    'h1n1_na_lipinski',
+    'rxnmol.objectives.objectives_constrained',
+    'H1N1NALipinskiObjective',
+    display_name='H1N1 NA × Lipinski',
+    supports_batch=True,
+    description='H1N1 NA docking penalized by Lipinski violations'
+)
+
 
 # -----------------------------------------------------------------------------
 # CLI: python -m rxnmol.objectives.registry

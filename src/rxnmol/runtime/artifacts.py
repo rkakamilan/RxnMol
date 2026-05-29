@@ -75,7 +75,12 @@ class ArtifactStore:
                 for rxn in reactions:
                     f.write(f"  {rxn}\n")
 
-    def save_config(self, config, filename: str = 'config_used.yaml'):
+    def save_config(self, config, filename: str = 'config.yaml'):
         """Save configuration."""
         config_file = self.output_dir / filename
         config.save(str(config_file))
+
+    def save_meta(self, meta: dict, filename: str = 'meta.json'):
+        """Save run metadata for analysis."""
+        meta_file = self.output_dir / filename
+        meta_file.write_text(json.dumps(meta, indent=2))

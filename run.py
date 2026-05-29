@@ -12,12 +12,16 @@ import argparse
 import logging
 from pathlib import Path
 import numpy as np
+import os
+import random
+import torch
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from rxnmol.core import MasterConfig, RunContext, CSAEngine
 from rxnmol.solutions import FragmentRouteSpec, SmilesDirectSpec, ReactionMolSpec
+from rxnmol.solutions.reaction_models import load_reaction_model
 from rxnmol.runtime import MetricsCollector, ArtifactStore
 from rxnmol.utils import parse_dynamic_overrides, resolve_output_dir
 
@@ -127,7 +131,22 @@ def main():
     else:
         random_seed = config.runtime.random_seed
         logger.info(f"  Using fixed random seed: {random_seed}")
-    
+
+    if config.runtime.device == "cuda" and config.runtime.require_cuda:
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA requested but not available. "
+                f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')} "
+                f"SLURM_JOB_GPUS={os.environ.get('SLURM_JOB_GPUS')} "
+                "Check GPU allocation/environment or set runtime.require_cuda=false."
+            )
+
+    random.seed(random_seed)
+    np.random.seed(random_seed)
+    torch.manual_seed(random_seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(random_seed)
+
     rng = np.random.default_rng(random_seed)
     context = RunContext(config=config, rng=rng)
 
@@ -138,13 +157,38 @@ def main():
     context.metrics = metrics
     context.artifacts = artifacts
 
-    # Save configuration
-    artifacts.save_config(config)
-    logger.info(f"  Saved config to: {config.output_dir}/config_used.yaml")
+    # Save configuration and metadata
+    artifacts.save_config(config, filename="config.yaml")
+    logger.info(f"  Saved config to: {config.output_dir}/config.yaml")
+    try:
+        meta = {
+            "model_tag": getattr(config.reaction_model, "tag", None),
+            "model_provider": config.reaction_model.provider,
+            "objective": config.objective.name,
+            "spec_type": config.solution.spec_type,
+            "min_fragments": config.solution.min_fragments,
+            "max_fragments": config.solution.max_fragments,
+            "repeat": config.experiment.repeat_id,
+            "bank_size": config.csa.bank_size,
+            "seed_size": config.csa.seed_size,
+            "max_iter": config.csa.max_iter,
+        }
+        artifacts.save_meta(meta)
+    except Exception as exc:
+        logger.warning("Failed to save meta.json: %s", exc)
 
     # Create solution specification based on spec_type
     logger.info(f"Creating solution specification...")
     spec_type = config.solution.spec_type
+
+    # Load reaction model once (shared across specs that need it)
+    if spec_type in ["fragment_route", "reaction_mol"]:
+        logger.info("Loading reaction model adapter...")
+        context.reaction_model = load_reaction_model(
+            config.reaction_model,
+            device=config.runtime.device,
+        )
+        logger.info("Reaction model loaded and attached to context.")
 
     if spec_type == "fragment_route":
         logger.info(f"  Type: Fragment-based synthesis routes")
@@ -194,7 +238,7 @@ def main():
         logger.info(f"Results saved to: {config.output_dir}/")
         logger.info(f"  Banks: bank_{engine.iteration}.txt")
         logger.info(f"  Traces: cycle_{engine.iteration}_traces/")
-        logger.info(f"  Config: config_used.yaml")
+        logger.info(f"  Config: config.yaml")
 
         return 0
 

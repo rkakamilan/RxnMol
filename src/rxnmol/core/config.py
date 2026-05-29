@@ -8,7 +8,7 @@ Example:
     >>> config = MasterConfig.from_yaml('input.yaml')
     >>> config.override_from_cli({'csa.bank_size': 200})
     >>> config.validate()
-    >>> config.save('output/config_used.yaml')
+    >>> config.save('output/config.yaml')
 """
 
 from dataclasses import dataclass, field, asdict
@@ -149,6 +149,49 @@ class DataConfig:
 
 
 @dataclass
+class ReactionModelConfig:
+    """Reaction prediction model configuration."""
+
+    provider: str = "transformer_v1"  # transformer_v1 | transformer_v2
+
+    # Common paths
+    model_dir: Optional[Path] = None
+    checkpoint_path: Optional[Path] = None
+    tokenizer_path: Optional[Path] = None
+    repo_path: Optional[Path] = None  # For transformer_v2 (external repo)
+    tag: Optional[str] = None  # Optional model tag for naming
+
+    # Inference settings
+    batch_size: Optional[int] = None
+    max_len: Optional[int] = 256
+    beam_size: int = 1
+    length_penalty: float = 1.0
+    task: str = "forward"
+
+    # Legacy-only settings
+    enforce_cuda: bool = True
+
+    # Compilation settings
+    compile: bool = True
+    compile_backend: str = "inductor"
+    compile_mode: str = "reduce-overhead"
+
+    def validate(self):
+        """Normalize path fields and provider string."""
+        if isinstance(self.model_dir, str):
+            self.model_dir = Path(self.model_dir)
+        if isinstance(self.checkpoint_path, str):
+            self.checkpoint_path = Path(self.checkpoint_path)
+        if isinstance(self.tokenizer_path, str):
+            self.tokenizer_path = Path(self.tokenizer_path)
+        if isinstance(self.repo_path, str):
+            self.repo_path = Path(self.repo_path)
+
+        if self.provider:
+            self.provider = self.provider.strip()
+
+
+@dataclass
 class OperatorConfig:
     """Genetic operation parameters."""
 
@@ -227,6 +270,9 @@ class PersistenceConfig:
     save_cache: bool = True
     save_config: bool = True
     save_metrics: bool = True
+    cache_auto_merge: bool = False
+    cache_auto_merge_delete: bool = False
+    cache_max_entries: Optional[int] = 5000000
 
     # Compression
     compress_banks: bool = True
@@ -244,6 +290,7 @@ class RuntimeConfig:
     random_seed: Optional[int] = None  # None = use system time for random seed
     num_workers: int = 1  # For parallel evaluation
     device: str = "cuda"  # "cuda", "cpu"
+    require_cuda: bool = False
 
     # Memory management
     cache_max_size: int = 100000
@@ -279,6 +326,7 @@ class MasterConfig:
     csa: CSAConfig = field(default_factory=CSAConfig)
     solution: SolutionConfig = field(default_factory=SolutionConfig)
     data: DataConfig = field(default_factory=DataConfig)
+    reaction_model: ReactionModelConfig = field(default_factory=ReactionModelConfig)
     operators: OperatorConfig = field(default_factory=OperatorConfig)
     objective: ObjectiveConfig = field(default_factory=ObjectiveConfig)
     monitoring: MonitoringConfig = field(default_factory=MonitoringConfig)
@@ -411,6 +459,7 @@ class MasterConfig:
             csa=CSAConfig(**data.get('csa', {})),
             solution=SolutionConfig(**data.get('solution', {})),
             data=DataConfig(**data_section),
+            reaction_model=ReactionModelConfig(**data.get('reaction_model', {})),
             operators=OperatorConfig(**data.get('operators', {})),
             objective=ObjectiveConfig(**data.get('objective', {})),
             monitoring=MonitoringConfig(**data.get('monitoring', {})),
@@ -544,6 +593,7 @@ class MasterConfig:
         self.csa.validate()
         self.solution.validate()
         self.data.validate()
+        self.reaction_model.validate()
         
         # Set method_name based on spec_type
         if self.experiment.method_name is None:

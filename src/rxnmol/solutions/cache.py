@@ -35,6 +35,8 @@ import sqlite3
 import os
 import atexit
 import hashlib
+import json
+import re
 import shutil
 from typing import Optional, List, Dict, Tuple
 from pathlib import Path
@@ -54,6 +56,171 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def compute_reaction_model_cache_id(config) -> Optional[str]:
+    """Compute a stable cache namespace for a reaction model config.
+
+    The namespace changes when model weights, tokenizer, or decoding settings change,
+    preventing stale cache hits across different models.
+    """
+    env_override = os.environ.get("RXNMOL_REACTION_CACHE_NAMESPACE") or os.environ.get("RXN_CACHE_NAMESPACE")
+    if env_override:
+        return env_override
+    if config is None:
+        return None
+
+    provider = getattr(config, "provider", None) or "model"
+    if not isinstance(provider, str):
+        provider = str(provider)
+    provider = provider.strip() or "model"
+
+    model_dir = _coerce_path(getattr(config, "model_dir", None))
+    checkpoint_path = _coerce_path(getattr(config, "checkpoint_path", None))
+    tokenizer_path = _coerce_path(getattr(config, "tokenizer_path", None))
+    repo_path = _coerce_path(getattr(config, "repo_path", None))
+
+    payload = {
+        "provider": provider,
+        "task": getattr(config, "task", None),
+        "beam_size": getattr(config, "beam_size", None),
+        "max_len": getattr(config, "max_len", None),
+        "length_penalty": getattr(config, "length_penalty", None),
+        "model_dir": str(model_dir) if model_dir else None,
+        "checkpoint_path": str(checkpoint_path) if checkpoint_path else None,
+        "tokenizer_path": str(tokenizer_path) if tokenizer_path else None,
+        "repo_path": str(repo_path) if repo_path else None,
+    }
+
+    candidate_files: List[Path] = []
+    if checkpoint_path:
+        candidate_files.append(checkpoint_path)
+
+    if provider == "transformer_v2":
+        if model_dir:
+            candidate_files.extend([
+                model_dir / "model.pt",
+                model_dir / "training_config.json",
+                model_dir / "tokenizer.json",
+            ])
+        if tokenizer_path:
+            candidate_files.append(tokenizer_path)
+    elif provider == "transformer_v1":
+        if model_dir:
+            candidate_files.extend([
+                model_dir / "model_compiled_kv.pt",
+                model_dir / "model.pt",
+                model_dir / "atom_mit_checkpoint_last.pt",
+                model_dir / "tokenizer_src.model",
+                model_dir / "tokenizer_trg.model",
+            ])
+    else:
+        if model_dir:
+            candidate_files.append(model_dir)
+
+    file_infos: List[Dict[str, object]] = []
+    seen_paths = set()
+    for path in candidate_files:
+        info = _path_info(path)
+        if not info:
+            continue
+        path_key = info.get("path")
+        if path_key in seen_paths:
+            continue
+        seen_paths.add(path_key)
+        file_infos.append(info)
+
+    file_infos.sort(key=lambda item: item.get("path", ""))
+    payload["files"] = file_infos
+
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    return f"{provider}-{digest[:12]}"
+
+
+def _coerce_path(value: Optional[object]) -> Optional[Path]:
+    if value is None:
+        return None
+    if isinstance(value, Path):
+        return value
+    try:
+        return Path(value)
+    except TypeError:
+        return None
+
+
+def _path_info(path: Optional[Path]) -> Optional[Dict[str, object]]:
+    if path is None:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    try:
+        resolved = str(path.resolve())
+    except OSError:
+        resolved = str(path)
+    return {
+        "path": resolved,
+        "size": stat.st_size,
+        "mtime": int(stat.st_mtime),
+        "is_dir": path.is_dir(),
+    }
+
+
+def _env_truthy(key: str) -> bool:
+    value = os.environ.get(key)
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_falsy(key: str) -> bool:
+    value = os.environ.get(key)
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"0", "false", "no", "off"}
+
+
+def _coerce_int(value: Optional[object], default: Optional[int] = None) -> Optional[int]:
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_model_slug(model_id: Optional[str], max_len: int = 24) -> str:
+    if not model_id:
+        return ""
+    safe_model = re.sub(r"[^A-Za-z0-9_-]+", "_", str(model_id))
+    safe_model = safe_model.strip("_")
+    if len(safe_model) > max_len:
+        safe_model = safe_model[-max_len:]
+    return safe_model
+
+
+def _scoped_shared_db_path(base_path: str, model_id: Optional[str]) -> str:
+    if not base_path or not model_id:
+        return base_path
+    try:
+        base_path = str(base_path)
+    except Exception:
+        return base_path
+    if _env_falsy("RXNMOL_CACHE_PER_MODEL"):
+        return base_path
+    safe_model = _safe_model_slug(model_id, max_len=32)
+    if not safe_model:
+        return base_path
+    if safe_model in os.path.basename(base_path):
+        return base_path
+    if "{model_id}" in base_path:
+        return base_path.format(model_id=safe_model)
+    if base_path.endswith(".db"):
+        return base_path[:-3] + f"__{safe_model}.db"
+    return base_path + f"__{safe_model}"
+
+
 class PersistentReactionCache:
     """
     A persistent cache for reaction predictions using SQLite.
@@ -69,6 +236,7 @@ class PersistentReactionCache:
         _memory_cache: In-memory dict for fastest access
         _shared_conn: Read-only connection to shared DB
         _local_conn: Read-write connection to local DB
+        model_id: Optional namespace prefix for cache keys
     """
 
     def __init__(
@@ -79,6 +247,11 @@ class PersistentReactionCache:
         preload_shared: bool = False,
         copy_shared_to_local: bool = True,
         local_storage_dir: str = "/tmp",
+        model_id: Optional[str] = None,
+        db_path: Optional[str] = None,
+        auto_merge_on_close: bool = False,
+        auto_merge_delete: bool = False,
+        cache_max_entries: Optional[int] = None,
     ):
         """
         Initialize the cache.
@@ -98,27 +271,62 @@ class PersistentReactionCache:
         # Runtime-local DB path (lives on node-local storage for safety/speed)
         self._local_db_persist_path: Optional[str] = None
 
-        # Shared DB (read-only)
+        # Shared DB (read-only) - base path (scoped after model_id is known)
+        if db_path:
+            shared_db_path = db_path
         env_override = os.environ.get("RXN_SHARED_CACHE_PATH") or os.environ.get("RXNMOL_SHARED_CACHE_PATH")
-        self.shared_db_path = env_override or shared_db_path
+        base_shared_path = env_override or shared_db_path
         if env_override:
-            logger.info(f"Using shared cache path from env: {self.shared_db_path}")
+            logger.info(f"Using shared cache path from env: {base_shared_path}")
+
+        # Local DB (per-process, write-only for durability)
+        self._local_db_dir = local_db_dir
+        os.makedirs(local_db_dir, exist_ok=True)
+        env_namespace = os.environ.get("RXNMOL_REACTION_CACHE_NAMESPACE") or os.environ.get("RXN_CACHE_NAMESPACE")
+        if model_id is None and env_namespace:
+            model_id = env_namespace
+        if isinstance(model_id, str):
+            model_id = model_id.strip() or None
+        self.model_id = model_id
+        self._model_prefix = f"{self.model_id}::" if self.model_id else ""
+        model_suffix = ""
+        if self.model_id:
+            safe_model = _safe_model_slug(self.model_id, max_len=24)
+            if safe_model:
+                model_suffix = f"_{safe_model}"
+        else:
+            logger.warning(
+                "ReactionCache model_id is not set; cache keys are un-namespaced and may mix models. "
+                "Set reaction_model config or RXNMOL_REACTION_CACHE_NAMESPACE."
+            )
+        self._auto_merge_on_close = auto_merge_on_close or _env_truthy("RXNMOL_CACHE_AUTO_MERGE")
+        self._auto_merge_delete = auto_merge_delete or _env_truthy("RXNMOL_CACHE_AUTO_MERGE_DELETE")
+        self._cache_max_entries = _coerce_int(
+            os.environ.get("RXNMOL_CACHE_MAX_ENTRIES"),
+            default=cache_max_entries,
+        )
+
+        self.shared_db_path = _scoped_shared_db_path(base_shared_path, self.model_id)
+        if self.shared_db_path != base_shared_path:
+            logger.info(
+                "Scoped shared cache path for model_id=%s -> %s",
+                self.model_id,
+                self.shared_db_path,
+            )
         self._shared_db_local_copy: Optional[str] = None  # Path to local copy if used
         self._shared_conn: Optional[sqlite3.Connection] = None
         self._init_shared_db(copy_shared_to_local, local_storage_dir)
 
-        # Local DB (per-process, write-only for durability)
-        os.makedirs(local_db_dir, exist_ok=True)
         if run_name:
             # Use meaningful name based on run (allows potential resume)
             # Sanitize run_name to be filesystem-safe
             safe_name = run_name.replace("/", "_").replace("\\", "_")
-            self.local_db_path = os.path.join(local_db_dir, f"cache_{safe_name}.db")
+            self.local_db_path = os.path.join(local_db_dir, f"cache_{safe_name}{model_suffix}.db")
         else:
             # Fallback: use PID + timestamp for uniqueness
             pid = os.getpid()
             timestamp = int(time.time() * 1000)
-            self.local_db_path = os.path.join(local_db_dir, f"cache_{pid}_{timestamp}.db")
+            self.local_db_path = os.path.join(local_db_dir, f"cache_{pid}_{timestamp}{model_suffix}.db")
 
         # Run-time location: prefer node-local tmp for safety (no WAL on NFS)
         runtime_local_root = (
@@ -144,7 +352,13 @@ class PersistentReactionCache:
         logger.info(
             f"ReactionCache initialized: "
             f"shared={self.shared_db_path} (exists={os.path.exists(self.shared_db_path)}), "
-            f"local={self.local_db_path}"
+            f"local={self.local_db_path}, "
+            f"model_id={self.model_id or 'none'}"
+        )
+        logger.info(
+            "ReactionCache local paths: runtime=%s persist=%s",
+            self.local_db_path,
+            self._local_db_persist_path,
         )
 
     def _init_shared_db(self, copy_to_local: bool = True, local_storage_dir: str = "/tmp"):
@@ -399,9 +613,10 @@ class PersistentReactionCache:
 
             # If local DB existed (resume scenario), load into memory
             if local_exists:
+                logger.info("Local cache exists; attempting resume: %s", self.local_db_path)
                 self._load_local_to_memory()
             else:
-                logger.debug(f"Local cache created: {self.local_db_path}")
+                logger.info("Local cache created: %s", self.local_db_path)
 
         except Exception as e:
             logger.error(f"Failed to initialize local cache: {e}")
@@ -419,11 +634,17 @@ class PersistentReactionCache:
             if count > 0:
                 t0 = time.time()
                 cursor = self._local_conn.execute("SELECT reactants, product FROM reactions")
+                loaded = 0
                 for row in cursor:
+                    if self._model_prefix and not row[0].startswith(self._model_prefix):
+                        continue
                     self._memory_cache[row[0]] = row[1]
-                logger.info(f"Resumed from local cache: loaded {count:,} entries in {time.time()-t0:.2f}s")
+                    loaded += 1
+                logger.info(
+                    f"Resumed from local cache: loaded {loaded:,} entries in {time.time()-t0:.2f}s"
+                )
             else:
-                logger.debug(f"Local cache exists but empty: {self.local_db_path}")
+                logger.info("Local cache exists but empty: %s", self.local_db_path)
         except Exception as e:
             logger.warning(f"Failed to load local cache for resume: {e}")
 
@@ -437,11 +658,18 @@ class PersistentReactionCache:
             cursor = self._shared_conn.execute("SELECT reactants, product FROM reactions")
             count = 0
             for row in cursor:
+                if self._model_prefix and not row[0].startswith(self._model_prefix):
+                    continue
                 self._memory_cache[row[0]] = row[1]
                 count += 1
             logger.info(f"Preloaded {count:,} entries from shared DB in {time.time()-t0:.2f}s")
         except Exception as e:
             logger.warning(f"Failed to preload shared DB: {e}")
+
+    def _make_key(self, reactants: str) -> str:
+        if not self._model_prefix:
+            return reactants
+        return f"{self._model_prefix}{reactants}"
 
     # =========================================================================
     # Core API
@@ -461,18 +689,19 @@ class PersistentReactionCache:
 
         # 1. Memory cache (fastest)
         # Contains: entries from shared DB + entries from resumed local DB + new predictions
-        if reactants in self._memory_cache:
-            return self._memory_cache[reactants]
+        key = self._make_key(reactants)
+        if key in self._memory_cache:
+            return self._memory_cache[key]
 
         # 2. Shared DB (read-only, immutable - no WAL/SHM access)
         if self._shared_conn:
             try:
                 cursor = self._shared_conn.execute(
-                    "SELECT product FROM reactions WHERE reactants = ?", (reactants,)
+                    "SELECT product FROM reactions WHERE reactants = ?", (key,)
                 )
                 row = cursor.fetchone()
                 if row:
-                    self._memory_cache[reactants] = row[0]
+                    self._memory_cache[key] = row[0]
                     return row[0]
             except Exception as e:
                 logger.debug(f"Shared DB read error: {e}")
@@ -489,14 +718,15 @@ class PersistentReactionCache:
             raise RuntimeError("Cache is closed")
 
         # 1. Memory cache
-        self._memory_cache[reactants] = product
+        key = self._make_key(reactants)
+        self._memory_cache[key] = product
 
         # 2. Local DB
         if self._local_conn:
             try:
                 self._local_conn.execute(
                     "INSERT OR REPLACE INTO reactions (reactants, product) VALUES (?, ?)",
-                    (reactants, product)
+                    (key, product)
                 )
                 self._local_conn.commit()
             except Exception as e:
@@ -516,14 +746,15 @@ class PersistentReactionCache:
             return []
 
         results = [None] * len(reactants_list)
-        missing = []  # (original_index, reactants) - not in memory
+        keys = [self._make_key(r) for r in reactants_list]
+        missing = []  # (original_index, key) - not in memory
 
         # Tier 1: Memory cache
-        for i, r in enumerate(reactants_list):
-            if r in self._memory_cache:
-                results[i] = self._memory_cache[r]
+        for i, key in enumerate(keys):
+            if key in self._memory_cache:
+                results[i] = self._memory_cache[key]
             else:
-                missing.append((i, r))
+                missing.append((i, key))
 
         if not missing:
             return results
@@ -531,14 +762,14 @@ class PersistentReactionCache:
         # Tier 2: Shared DB (read-only, immutable)
         if self._shared_conn:
             try:
-                for idx, r in missing:
+                for idx, key in missing:
                     cursor = self._shared_conn.execute(
-                        "SELECT product FROM reactions WHERE reactants = ?", (r,)
+                        "SELECT product FROM reactions WHERE reactants = ?", (key,)
                     )
                     row = cursor.fetchone()
                     if row:
                         results[idx] = row[0]
-                        self._memory_cache[r] = row[0]
+                        self._memory_cache[key] = row[0]
             except Exception as e:
                 logger.debug(f"Shared DB batch read error: {e}")
 
@@ -557,15 +788,16 @@ class PersistentReactionCache:
             return
 
         # 1. Memory cache
-        for r, p in zip(reactants_list, products_list):
-            self._memory_cache[r] = p
+        keys = [self._make_key(r) for r in reactants_list]
+        for key, p in zip(keys, products_list):
+            self._memory_cache[key] = p
 
         # 2. Local DB (batch insert)
         if self._local_conn:
             try:
                 self._local_conn.executemany(
                     "INSERT OR REPLACE INTO reactions (reactants, product) VALUES (?, ?)",
-                    list(zip(reactants_list, products_list))
+                    list(zip(keys, products_list))
                 )
                 self._local_conn.commit()
             except Exception as e:
@@ -613,6 +845,29 @@ class PersistentReactionCache:
                 logger.warning(f"Error closing shared cache: {e}")
             self._shared_conn = None
 
+        if self._auto_merge_on_close:
+            try:
+                local_paths = []
+                if self._local_db_persist_path and os.path.exists(self._local_db_persist_path):
+                    local_paths.append(self._local_db_persist_path)
+                elif self.local_db_path and os.path.exists(self.local_db_path):
+                    local_paths.append(self.local_db_path)
+
+                if local_paths:
+                    logger.info("Auto-merging local cache into shared DB...")
+                    merge_local_caches_to_shared(
+                        local_db_dir=self._local_db_dir,
+                        shared_db_path=self.shared_db_path,
+                        delete_after_merge=self._auto_merge_delete,
+                        max_entries=self._cache_max_entries,
+                        local_db_paths=local_paths,
+                        model_id=self.model_id,
+                    )
+                else:
+                    logger.warning("Auto-merge skipped: no local cache file found")
+            except Exception as e:
+                logger.warning(f"Auto-merge failed: {e}")
+
     def get_stats(self) -> Dict:
         """Get cache statistics."""
         stats = {
@@ -620,6 +875,9 @@ class PersistentReactionCache:
             "shared_db_connected": self._shared_conn is not None,
             "shared_db_path": self.shared_db_path,
             "local_db_path": self.local_db_path,
+            "model_id": self.model_id or "none",
+            "auto_merge_on_close": self._auto_merge_on_close,
+            "cache_max_entries": self._cache_max_entries,
         }
 
         if self._local_conn:
@@ -655,6 +913,9 @@ def merge_local_caches_to_shared(
     shared_db_path: str = "./cache/reaction_cache_shared.db",
     delete_after_merge: bool = False,
     batch_size: int = 10000,
+    max_entries: Optional[int] = None,
+    local_db_paths: Optional[List[str]] = None,
+    model_id: Optional[str] = None,
 ) -> Dict:
     """
     Merge all local cache databases into the shared database.
@@ -667,6 +928,9 @@ def merge_local_caches_to_shared(
         shared_db_path: Path to the shared database
         delete_after_merge: If True, delete local DBs after successful merge
         batch_size: Number of rows to insert per transaction
+        max_entries: If set, prune shared DB to keep only most recent inserts
+        local_db_paths: If provided, merge only these local cache files
+        model_id: If provided, only merge rows matching this model namespace
 
     Returns:
         Dict with merge statistics
@@ -688,17 +952,47 @@ def merge_local_caches_to_shared(
         "total_entries_processed": 0,
         "new_entries_added": 0,
         "duplicate_entries_skipped": 0,
+        "entries_skipped_model_mismatch": 0,
+        "entries_pruned": 0,
         "errors": [],
     }
+    model_prefix = f"{model_id}::" if model_id else ""
+    safe_model = _safe_model_slug(model_id, max_len=24) if model_id else ""
 
-    # Find all local cache files
-    pattern = os.path.join(local_db_dir, "cache_*.db")
-    local_files = glob.glob(pattern)
-    stats["local_files_found"] = len(local_files)
+    # Find all local cache files (or use explicit list)
+    if local_db_paths:
+        local_files = [path for path in local_db_paths if path and os.path.exists(path)]
+        stats["local_files_found"] = len(local_files)
+        missing = [path for path in local_db_paths if not path or not os.path.exists(path)]
+        if missing:
+            stats["errors"].append(f"Missing local cache files: {missing}")
+    else:
+        pattern = os.path.join(local_db_dir, "cache_*.db")
+        local_files = glob.glob(pattern)
+        stats["local_files_found"] = len(local_files)
 
     if not local_files:
         logger.info(f"No local cache files found in {local_db_dir}")
         return stats
+
+    if model_id and safe_model:
+        filtered = [
+            path for path in local_files
+            if f"_{safe_model}.db" in os.path.basename(path)
+        ]
+        if filtered:
+            local_files = filtered
+            stats["local_files_found"] = len(local_files)
+            logger.info(
+                "Filtering local caches for model_id=%s: %d files",
+                model_id,
+                len(local_files),
+            )
+        else:
+            logger.info(
+                "No local cache filenames matched model_id=%s; will filter rows by prefix",
+                model_id,
+            )
 
     logger.info(f"Found {len(local_files)} local cache files to merge")
 
@@ -730,14 +1024,6 @@ def merge_local_caches_to_shared(
             "CREATE INDEX IF NOT EXISTS idx_reactants ON reactions(reactants)"
         )
         shared_conn.commit()
-
-        # Get existing keys in shared DB for deduplication
-        logger.info("Loading existing keys from shared DB...")
-        existing_keys = set()
-        cursor = shared_conn.execute("SELECT reactants FROM reactions")
-        for row in cursor:
-            existing_keys.add(row[0])
-        logger.info(f"Shared DB has {len(existing_keys):,} existing entries")
 
         # Process each local file
         for local_path in local_files:
@@ -771,12 +1057,41 @@ def merge_local_caches_to_shared(
                     stats["local_files_skipped"] += 1
                     continue
 
-                # Read entries from local DB
+                # Stream entries from local DB in batches
                 cursor = local_conn.execute("SELECT reactants, product FROM reactions")
-                rows = cursor.fetchall()
+                local_total = 0
+                local_new = 0
+                local_dup = 0
+
+                shared_conn.execute("BEGIN")
+                while True:
+                    rows = cursor.fetchmany(batch_size)
+                    if not rows:
+                        break
+                    if model_prefix:
+                        original_len = len(rows)
+                        rows = [row for row in rows if row[0].startswith(model_prefix)]
+                        skipped = original_len - len(rows)
+                        if skipped:
+                            stats["entries_skipped_model_mismatch"] += skipped
+                        if not rows:
+                            continue
+                    local_total += len(rows)
+                    stats["total_entries_processed"] += len(rows)
+
+                    before = shared_conn.total_changes
+                    shared_conn.executemany(
+                        "INSERT OR IGNORE INTO reactions (reactants, product) VALUES (?, ?)",
+                        rows,
+                    )
+                    inserted = shared_conn.total_changes - before
+                    local_new += inserted
+                    local_dup += len(rows) - inserted
+
+                shared_conn.commit()
                 local_conn.close()
 
-                if not rows:
+                if local_total == 0:
                     logger.debug(f"Empty local cache: {local_path}")
                     stats["local_files_skipped"] += 1
                     if delete_after_merge:
@@ -784,30 +1099,11 @@ def merge_local_caches_to_shared(
                         stats["local_files_deleted"] += 1
                     continue
 
-                # Filter out duplicates
-                new_rows = []
-                for reactants, product in rows:
-                    stats["total_entries_processed"] += 1
-                    if reactants not in existing_keys:
-                        new_rows.append((reactants, product))
-                        existing_keys.add(reactants)  # Track for subsequent files
-                    else:
-                        stats["duplicate_entries_skipped"] += 1
-
-                # Insert new entries in batches
-                if new_rows:
-                    for i in range(0, len(new_rows), batch_size):
-                        batch = new_rows[i:i+batch_size]
-                        shared_conn.executemany(
-                            "INSERT OR IGNORE INTO reactions (reactants, product) VALUES (?, ?)",
-                            batch
-                        )
-                    shared_conn.commit()
-                    stats["new_entries_added"] += len(new_rows)
-
+                stats["new_entries_added"] += local_new
+                stats["duplicate_entries_skipped"] += local_dup
                 stats["local_files_merged"] += 1
                 logger.info(
-                    f"Merged {local_path}: {len(new_rows)} new / {len(rows)} total entries"
+                    f"Merged {local_path}: {local_new} new / {local_total} total entries"
                 )
 
                 # Delete local file if requested
@@ -817,7 +1113,35 @@ def merge_local_caches_to_shared(
 
             except Exception as e:
                 logger.error(f"Error processing {local_path}: {e}")
+                try:
+                    shared_conn.rollback()
+                except Exception:
+                    pass
                 stats["errors"].append(f"{local_path}: {str(e)}")
+
+        # Optional pruning to cap shared DB size (keeps most recent inserts)
+        if max_entries is not None:
+            try:
+                cursor = shared_conn.execute("SELECT COUNT(*) FROM reactions")
+                total = cursor.fetchone()[0]
+                if total > max_entries:
+                    to_prune = total - max_entries
+                    logger.info(f"Pruning shared cache: {total} -> {max_entries} (drop {to_prune})")
+                    shared_conn.execute(
+                        """
+                        DELETE FROM reactions
+                        WHERE rowid NOT IN (
+                            SELECT rowid FROM reactions
+                            ORDER BY rowid DESC
+                            LIMIT ?
+                        )
+                        """,
+                        (max_entries,),
+                    )
+                    shared_conn.commit()
+                    stats["entries_pruned"] = to_prune
+            except Exception as e:
+                logger.warning(f"Shared cache prune failed: {e}")
                 stats["local_files_skipped"] += 1
 
         # Final commit and cleanup
@@ -938,6 +1262,14 @@ if __name__ == "__main__":
         "--delete", action="store_true",
         help="Delete local files after successful merge"
     )
+    merge_parser.add_argument(
+        "--max-entries", type=int, default=None,
+        help="Max entries to keep in shared cache (prune oldest inserts)"
+    )
+    merge_parser.add_argument(
+        "--model-id", default=None,
+        help="Only merge entries matching this model_id (prefix filter)"
+    )
 
     # Verify command
     verify_parser = subparsers.add_parser("verify", help="Verify shared cache integrity")
@@ -966,6 +1298,8 @@ if __name__ == "__main__":
             local_db_dir=args.local_dir,
             shared_db_path=args.shared_db,
             delete_after_merge=args.delete,
+            max_entries=args.max_entries,
+            model_id=args.model_id,
         )
         print(f"\nMerge Statistics:")
         for key, value in stats.items():
