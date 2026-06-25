@@ -90,6 +90,8 @@ class SolutionConfig:
     # Scaffold-hop (core-hopping): two FIXED reactive warhead precursors
     warhead_a: Optional[str] = None
     warhead_b: Optional[str] = None
+    warheads: Optional[List[str]] = None          # mode B: core-first, N fixed warheads
+    warhead_patterns: Optional[List[str]] = None  # optional gate SMARTS (one per warhead)
 
     def validate(self):
         """Validate solution parameters."""
@@ -105,7 +107,7 @@ class SolutionConfig:
             assert self.num_step > 0, \
                 f"num_step must be positive, got {self.num_step}"
         if self.spec_type == "scaffold_hop_route":
-            assert self.warhead_a and self.warhead_b, "scaffold_hop_route requires solution.warhead_a and solution.warhead_b"
+            assert self.warheads or (self.warhead_a and self.warhead_b), "scaffold_hop_route requires solution.warheads or (warhead_a and warhead_b)"
 
 
 @dataclass
