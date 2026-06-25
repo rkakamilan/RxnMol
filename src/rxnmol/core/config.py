@@ -87,9 +87,13 @@ class SolutionConfig:
     # ReactionMol specific parameters
     num_step: int = 5
 
+    # Scaffold-hop (core-hopping): two FIXED reactive warhead precursors
+    warhead_a: Optional[str] = None
+    warhead_b: Optional[str] = None
+
     def validate(self):
         """Validate solution parameters."""
-        valid_types = ["fragment_route", "smiles", "hybrid", "reaction_mol"]
+        valid_types = ["fragment_route", "smiles", "hybrid", "reaction_mol", "scaffold_hop_route"]
         assert self.spec_type in valid_types, \
             f"Invalid spec_type: {self.spec_type}. Must be one of {valid_types}"
         assert 0 < self.min_fragments <= self.max_fragments, \
@@ -100,6 +104,8 @@ class SolutionConfig:
         if self.spec_type == "reaction_mol":
             assert self.num_step > 0, \
                 f"num_step must be positive, got {self.num_step}"
+        if self.spec_type == "scaffold_hop_route":
+            assert self.warhead_a and self.warhead_b, "scaffold_hop_route requires solution.warhead_a and solution.warhead_b"
 
 
 @dataclass

@@ -20,7 +20,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from rxnmol.core import MasterConfig, RunContext, CSAEngine
-from rxnmol.solutions import FragmentRouteSpec, SmilesDirectSpec, ReactionMolSpec
+from rxnmol.solutions import FragmentRouteSpec, SmilesDirectSpec, ReactionMolSpec, ScaffoldHopRouteSpec
 from rxnmol.solutions.reaction_models import load_reaction_model
 from rxnmol.runtime import MetricsCollector, ArtifactStore
 from rxnmol.utils import parse_dynamic_overrides, resolve_output_dir
@@ -182,7 +182,7 @@ def main():
     spec_type = config.solution.spec_type
 
     # Load reaction model once (shared across specs that need it)
-    if spec_type in ["fragment_route", "reaction_mol"]:
+    if spec_type in ["fragment_route", "reaction_mol", "scaffold_hop_route"]:
         logger.info("Loading reaction model adapter...")
         context.reaction_model = load_reaction_model(
             config.reaction_model,
@@ -200,6 +200,9 @@ def main():
     elif spec_type == "reaction_mol":
         spec = ReactionMolSpec(context)
         logger.info(f"  Type: ReactionMol optimization")
+    elif spec_type == "scaffold_hop_route":
+        spec = ScaffoldHopRouteSpec(context)
+        logger.info(f"  Type: Scaffold-hop (fixed warheads, variable core)")
     else:
         raise ValueError(f"Unsupported spec_type: {spec_type}")
 
