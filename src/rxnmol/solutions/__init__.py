@@ -10,11 +10,13 @@ Provides abstract interface for different solution representations:
 from .base import SolutionSpec
 from .fragments_route import FragmentRouteSpec
 from .smiles_based import SmilesDirectSpec
-from .reaction_mol import ReactionMolSpec   
+from .reaction_mol import ReactionMolSpec
+from .fragments_route_scaffhop import ScaffoldHopRouteSpec   
 
 __all__ = [
     "SolutionSpec",
     "FragmentRouteSpec",
     "SmilesDirectSpec",
-    "ReactionMolSpec"
+    "ReactionMolSpec",
+    "ScaffoldHopRouteSpec"
 ]

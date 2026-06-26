@@ -1,0 +1,65 @@
+csa:
+  bank_size: 24
+  seed_size: 12
+  max_iter: 4
+  d_init: 0.6
+  d_min: 0.1
+  gamma: 0.990
+  n_cross_op1: 0
+  n_cross_op2: 0
+  n_mut_op: 4
+  early_stop_patience: 50
+  local_optimization_enabled: false
+  local_optimization_frequency: 1
+  local_optimization_max_steps: 3
+  local_optimization_neighbors: 5
+solution:
+  spec_type: scaffold_hop_route
+  warhead_a: "OC(=O)c1cc(C)ccc1-n1nccn1"
+  warhead_b: "Clc1nc2cc(Cl)ccc2o1"
+  max_fragments: 3
+  min_fragments: 3
+  max_mol_size: null
+data:
+  data_dir: "data/"
+  building_blocks_file: "cores.smi"
+  cache_path: "cache/reaction_cache.db"
+operators:
+  crossover_enabled: false
+  mutation_enabled: true
+  crossover_prob: 0.0
+  mutation_add_prob: 0.0
+  mutation_delete_prob: 0.0
+  mutation_replace_prob: 1.0
+objective:
+  name: vina_ox2r_ant
+monitoring:
+  save_interval: 1
+  log_level: INFO
+  track_diversity: true
+  track_timing: true
+  track_operators: true
+persistence:
+  save_banks: true
+  save_traces: true
+  save_config: true
+  save_metrics: true
+
+reaction_model:
+  provider: transformer_v2
+  model_dir: models/reaction
+  checkpoint_path: null
+  tokenizer_path: null
+  repo_path: null
+  batch_size: null
+  max_len: 256
+  beam_size: 1
+  length_penalty: 1.0
+  task: forward
+  enforce_cuda: true
+  compile: false
+  compile_backend: inductor
+  compile_mode: reduce-overhead
+
+runs_dir: ./runs/uspto_mit_v2/
+output_dir: null
